@@ -217,7 +217,7 @@ async def dashboard(request: Request):
     host = request.headers.get("host", "your-space-name.hf.space")
     proto = request.headers.get("x-forwarded-proto", "https")
     sse_url = f"{proto}://{host}/sse"
-    token_val = BEARER_TOKEN if BEARER_TOKEN else "YOUR_TOKEN_HERE"
+    token_val = "YOUR_BEARER_TOKEN"
     
     html_content = f"""
     <!DOCTYPE html>
