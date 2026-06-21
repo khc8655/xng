@@ -1,39 +1,32 @@
-FROM python:3.11-slim
+FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive \
-    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+    DEBIAN_FRONTEND=noninteractive
 
-# Install basic tools
+# Install curl/wget if not present
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cloudflared (detects architecture: amd64 / arm64)
+# Install cloudflared static binary directly (detects architecture: amd64 / arm64)
 RUN arch=$(uname -m) && \
     if [ "$arch" = "x86_64" ]; then \
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64.deb -O cloudflared.deb; \
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared; \
     elif [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then \
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64.deb -O cloudflared.deb; \
+        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -O /usr/local/bin/cloudflared; \
     else \
         echo "Unsupported architecture: $arch" && exit 1; \
     fi && \
-    dpkg -i cloudflared.deb && \
-    rm cloudflared.deb
+    chmod +x /usr/local/bin/cloudflared
 
 WORKDIR /app
 
 # Copy requirements and install dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-# Install Playwright Chromium and its system dependencies
-RUN playwright install chromium && \
-    playwright install-deps chromium && \
-    rm -rf /var/lib/apt/lists/*
 
 # Copy app files
 COPY . .
