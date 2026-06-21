@@ -187,7 +187,9 @@ class TokenAuthMiddleware:
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 200)
                 if status_code >= 400:
-                    logger.warning(f"HTTP Response Error: {method} {path} -> Status {status_code}")
+                    req_headers = dict(scope.get("headers", []))
+                    session_id = req_headers.get(b"mcp-session-id", b"").decode("utf-8") if b"mcp-session-id" in req_headers else ""
+                    logger.warning(f"HTTP Response Error: {method} {path} -> Status {status_code} | Session ID: {session_id}")
             await send(message)
 
         # Rewrite paths for backwards compatibility with old client configurations
@@ -281,6 +283,26 @@ async def post_mcp_sse(request: Request):
     scope = request.scope
     scope["path"] = "/mcp"
     await streamable_http_asgi_app(scope, request.receive, request._send)
+    return EmptyResponse()
+
+@app.get("/mcp/sse")
+@app.get("/mcp/sse/")
+async def get_mcp_sse(request: Request):
+    # Check if this GET request is for Streamable HTTP or standard SSE.
+    # If the mcp-session-id header is present, it's a Streamable HTTP request.
+    # Otherwise, it's a standard SSE request.
+    headers = dict(request.headers)
+    session_id = headers.get("mcp-session-id")
+    
+    if session_id:
+        scope = request.scope
+        scope["path"] = "/mcp"
+        await streamable_http_asgi_app(scope, request.receive, request._send)
+    else:
+        scope = request.scope
+        scope["path"] = "/sse"
+        await mcp.sse_app()(scope, request.receive, request._send)
+        
     return EmptyResponse()
 
 # Mount native FastMCP SSE app
