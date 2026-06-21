@@ -596,23 +596,17 @@ async def dashboard(request: Request):
                     <ul class="card-details-list">
                         <li>
                             <span>爬虫引擎</span>
-                            <span class="active-text">Playwright (Chromium)</span>
-                        </li>
-                    </ul>
-                </div>
-            </div>
-
-            <!-- Client Config block -->
+                <!-- Client Config block -->
             <div class="config-section">
                 <div class="config-header">
                     <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop 客户端配置助手</span>
                     <div style="display: flex; gap: 0.5rem;">
-                        <button class="tab-btn active" onclick="showTab('remote')">远程 SSE 桥接</button>
-                        <button class="tab-btn" onclick="showTab('local')">本地 Stdio 命令行</button>
+                        <button class="tab-btn active" onclick="showTab('node')">Node.js 全局桥接 (推荐)</button>
+                        <button class="tab-btn" onclick="showTab('python')">Python 极速桥接</button>
                     </div>
                 </div>
                 <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;" id="config-desc">
-                    推荐！使用 npx 桥接工具 mcp-remote 访问部署在 Hugging Face Spaces 上的远程服务：
+                    推荐！在本地终端执行 <code>npm install -g mcp-remote</code> 进行全局安装，以获得极速启动且免下载的桥接体验：
                 </p>
                 <div style="position: relative;">
                     <pre id="json-config" style="padding-top: 2.5rem; min-height: 180px;"></pre>
@@ -627,46 +621,42 @@ async def dashboard(request: Request):
 
         <script>
             // Config Templates
-            const remoteConfig = `{{
+            const nodeConfig = `{{
   "mcpServers": {{
     "hf-search-crawl-mcp": {{
-      "command": "npx",
+      "command": "mcp-remote",
       "args": [
-        "-y",
-        "mcp-remote",
         "{sse_url}?token={token_val}"
       ]
     }}
   }}
-}}}}`;
+}}`;
 
-            const localConfig = `{{
+            const pythonConfig = `{{
   "mcpServers": {{
-    "local-search-crawl-mcp": {{
-      "command": "/Users/xk/Documents/mcp/.venv/bin/python3",
+    "hf-search-crawl-mcp": {{
+      "command": "python3",
       "args": [
-        "/Users/xk/Documents/mcp/app.py"
-      ],
-      "env": {{
-        "BEARER_TOKEN": "{token_val}",
-        "SEARXNG_URL": "https://searxng.site"
-      }}
+        "-m",
+        "mcp.cli.client",
+        "{sse_url}?token={token_val}"
+      ]
     }}
   }}
-}}}}`;
+}}`;
 
-            let currentTab = 'remote';
+            let currentTab = 'node';
 
             function updateConfigDisplay() {{
                 const configPre = document.getElementById('json-config');
                 const desc = document.getElementById('config-desc');
                 
-                if (currentTab === 'remote') {{
-                    configPre.textContent = remoteConfig;
-                    desc.innerHTML = '使用 <code>mcp-remote</code> 桥接工具连接部署在 Hugging Face 的远程服务器（无需本地配置 Python 环境）：';
+                if (currentTab === 'node') {{
+                    configPre.textContent = nodeConfig;
+                    desc.innerHTML = '推荐！在本地终端执行 <code>npm install -g mcp-remote</code> 全局安装桥接器，启动极速且完全免去 npx 每次运行时耗时在线检查的开销：';
                 }} else {{
-                    configPre.textContent = localConfig;
-                    desc.innerHTML = '在您本地的 macOS 电脑上直接使用虚拟环境中的 Python 执行（极速、低延迟、纯本地运行）：';
+                    configPre.textContent = pythonConfig;
+                    desc.innerHTML = '免 Node 环境！在本地环境执行 <code>pip install mcp</code>，利用 Python SDK 自带的连接器直接运行，瞬间拉起连接：';
                 }}
             }}
 
@@ -678,8 +668,8 @@ async def dashboard(request: Request):
                 
                 // Highlight active button
                 const btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => {{
-                    if (tab === 'remote') return b.textContent.includes('远程');
-                    return b.textContent.includes('本地');
+                    if (tab === 'node') return b.textContent.includes('Node');
+                    return b.textContent.includes('Python');
                 }});
                 if (btn) btn.classList.add('active');
                 
