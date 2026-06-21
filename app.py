@@ -655,6 +655,7 @@ async def dashboard(request: Request):
                         </li>
                     </ul>
                 </div>
+            </div>
 
             <!-- Client Config block -->
             <div class="config-section">
