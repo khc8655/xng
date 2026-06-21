@@ -213,8 +213,8 @@ async def api_stats():
 # Premium HTML Dashboard UI
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
-    # Dynamic host detection for config helper
-    host = request.headers.get("host", "your-space-name.hf.space")
+    # Dynamic host detection for config helper (checking X-Forwarded-Host from proxy)
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", "your-space-name.hf.space"))
     proto = request.headers.get("x-forwarded-proto", "https")
     sse_url = f"{proto}://{host}/sse"
     token_val = "YOUR_BEARER_TOKEN"
