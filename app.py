@@ -1,8 +1,10 @@
 import os
 import logging
 import re
+import time
+import subprocess
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 import httpx
 from bs4 import BeautifulSoup
 from markdownify import markdownify as md
@@ -17,6 +19,11 @@ logger = logging.getLogger("mcp-server")
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "https://searxng.site")
 
+# Global counters and startup time
+search_count = 0
+crawl_count = 0
+start_time = time.time()
+
 # 1. Initialize FastMCP
 mcp = FastMCP("Search & Crawl Server")
 
@@ -30,6 +37,9 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
         engines: Optional comma-separated list of engines to query (e.g. google, bing, duckduckgo, wikipedia).
         page: Page number for search results.
     """
+    global search_count
+    search_count += 1
+    
     url = SEARXNG_URL.rstrip("/") + "/search"
     params = {
         "q": query,
@@ -92,6 +102,9 @@ async def crawl_page(url: str) -> str:
     Args:
         url: The absolute URL of the web page to crawl.
     """
+    global crawl_count
+    crawl_count += 1
+    
     try:
         logger.info(f"Crawling with Crawl4AI: {url}")
         browser_conf = BrowserConfig(
@@ -118,6 +131,31 @@ async def crawl_page(url: str) -> str:
     except Exception as e:
         return f"Error crawling page '{url}': {str(e)}"
 
+# Helper to check if cloudflared process is active
+def is_tunnel_running() -> bool:
+    try:
+        # Check if cloudflared is running using pgrep
+        output = subprocess.check_output(["pgrep", "cloudflared"])
+        return len(output) > 0
+    except Exception:
+        return False
+
+# Uptime text generator
+def get_uptime() -> str:
+    uptime_seconds = int(time.time() - start_time)
+    days, remainder = divmod(uptime_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if days > 0:
+        parts.append(f"{days}d")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
+
 # 4. Setup SSE Transport
 transport = SseServerTransport("/messages/")
 
@@ -135,8 +173,8 @@ app.mount("/messages/", app=transport.handle_post_message)
 
 @app.middleware("http")
 async def verify_bearer_token(request: Request, call_next):
-    # Exclude health check from token check
-    if request.url.path == "/health":
+    # Exclude root path, assets, stats, and health check from token check
+    if request.url.path in ["/", "/health", "/api/stats"]:
         return await call_next(request)
         
     if BEARER_TOKEN:
@@ -157,3 +195,457 @@ async def verify_bearer_token(request: Request, call_next):
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "searxng_url": SEARXNG_URL, "auth_enabled": BEARER_TOKEN is not None}
+
+# API Endpoint to fetch current stats
+@app.get("/api/stats")
+async def api_stats():
+    return {
+        "status": "online",
+        "uptime": get_uptime(),
+        "searxng_url": SEARXNG_URL,
+        "auth_enabled": BEARER_TOKEN is not None,
+        "tunnel_connected": is_tunnel_running(),
+        "stats": {
+            "searches": search_count,
+            "crawls": crawl_count
+        }
+    }
+
+# Premium HTML Dashboard UI
+@app.get("/", response_class=HTMLResponse)
+async def dashboard(request: Request):
+    # Dynamic host detection for config helper
+    host = request.headers.get("host", "your-space-name.hf.space")
+    proto = request.headers.get("x-forwarded-proto", "https")
+    sse_url = f"{proto}://{host}/sse"
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>MCP Server Dashboard</title>
+        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <style>
+            :root {{
+                --bg-primary: #0f172a;
+                --bg-secondary: rgba(30, 41, 59, 0.7);
+                --text-main: #f8fafc;
+                --text-muted: #94a3b8;
+                --accent-color: #3b82f6;
+                --success-color: #10b981;
+                --warning-color: #f59e0b;
+                --card-border: rgba(255, 255, 255, 0.08);
+            }}
+
+            * {{
+                box-sizing: border-box;
+                margin: 0;
+                padding: 0;
+            }}
+
+            body {{
+                font-family: 'Inter', sans-serif;
+                background-color: var(--bg-primary);
+                background-image: radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 40%),
+                                  radial-gradient(circle at 90% 80%, rgba(99, 102, 241, 0.08) 0%, transparent 40%);
+                color: var(--text-main);
+                min-height: 100vh;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                padding: 2rem;
+            }}
+
+            header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 2rem;
+                padding-bottom: 1rem;
+                border-bottom: 1px solid var(--card-border);
+            }}
+
+            .logo-area {{
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+            }}
+
+            .logo-icon {{
+                font-size: 1.8rem;
+                color: var(--accent-color);
+                text-shadow: 0 0 15px rgba(59, 130, 246, 0.5);
+            }}
+
+            h1 {{
+                font-size: 1.5rem;
+                font-weight: 700;
+                letter-spacing: -0.025em;
+            }}
+
+            .status-badge {{
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+                background: rgba(16, 185, 129, 0.15);
+                border: 1px solid rgba(16, 185, 129, 0.3);
+                padding: 0.4rem 0.8rem;
+                border-radius: 9999px;
+                font-size: 0.875rem;
+                font-weight: 500;
+                color: var(--success-color);
+            }}
+
+            .status-dot {{
+                width: 8px;
+                height: 8px;
+                background-color: var(--success-color);
+                border-radius: 50%;
+                box-shadow: 0 0 10px var(--success-color);
+                animation: pulse 1.8s infinite;
+            }}
+
+            @keyframes pulse {{
+                0% {{ transform: scale(0.95); opacity: 0.5; }}
+                50% {{ transform: scale(1.15); opacity: 1; }}
+                100% {{ transform: scale(0.95); opacity: 0.5; }}
+            }}
+
+            main {{
+                flex: 1;
+                display: flex;
+                flex-direction: column;
+                gap: 2rem;
+                max-width: 1200px;
+                margin: 0 auto;
+                width: 100%;
+            }}
+
+            .grid-stats {{
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 1.5rem;
+            }}
+
+            .card {{
+                background: var(--bg-secondary);
+                backdrop-filter: blur(12px);
+                border: 1px solid var(--card-border);
+                border-radius: 16px;
+                padding: 1.5rem;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                position: relative;
+                overflow: hidden;
+                transition: transform 0.2s ease, border-color 0.2s ease;
+            }}
+
+            .card:hover {{
+                transform: translateY(-2px);
+                border-color: rgba(59, 130, 246, 0.25);
+            }}
+
+            .card-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1rem;
+            }}
+
+            .card-title {{
+                font-size: 0.875rem;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: var(--text-muted);
+            }}
+
+            .card-icon {{
+                font-size: 1.25rem;
+                color: var(--accent-color);
+            }}
+
+            .card-value {{
+                font-size: 2.25rem;
+                font-weight: 700;
+                color: var(--text-main);
+                margin: 0.5rem 0;
+            }}
+
+            .card-desc {{
+                font-size: 0.825rem;
+                color: var(--text-muted);
+            }}
+
+            .status-indicator {{
+                display: inline-flex;
+                align-items: center;
+                gap: 0.35rem;
+                font-weight: 600;
+            }}
+
+            .active-text {{ color: var(--success-color); }}
+            .inactive-text {{ color: var(--warning-color); }}
+
+            .card-details-list {{
+                margin-top: 0.5rem;
+                list-style: none;
+                font-size: 0.85rem;
+                color: var(--text-muted);
+            }}
+
+            .card-details-list li {{
+                display: flex;
+                justify-content: space-between;
+                padding: 0.4rem 0;
+                border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+            }}
+
+            .card-details-list li:last-child {{
+                border-bottom: none;
+            }}
+
+            .config-section {{
+                background: var(--bg-secondary);
+                backdrop-filter: blur(12px);
+                border: 1px solid var(--card-border);
+                border-radius: 16px;
+                padding: 1.5rem;
+            }}
+
+            .config-header {{
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 1.2rem;
+            }}
+
+            .config-title {{
+                font-size: 1.1rem;
+                font-weight: 600;
+                display: flex;
+                align-items: center;
+                gap: 0.5rem;
+            }}
+
+            .copy-btn {{
+                background: rgba(59, 130, 246, 0.15);
+                border: 1px solid rgba(59, 130, 246, 0.3);
+                color: var(--accent-color);
+                padding: 0.4rem 0.8rem;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 0.85rem;
+                font-weight: 500;
+                display: flex;
+                align-items: center;
+                gap: 0.4rem;
+                transition: background 0.2s;
+            }}
+
+            .copy-btn:hover {{
+                background: rgba(59, 130, 246, 0.3);
+            }}
+
+            pre {{
+                background: rgba(15, 23, 42, 0.8);
+                padding: 1rem;
+                border-radius: 8px;
+                border: 1px solid rgba(255, 255, 255, 0.04);
+                overflow-x: auto;
+                font-family: 'Courier New', Courier, monospace;
+                font-size: 0.875rem;
+                color: #38bdf8;
+                line-height: 1.5;
+            }}
+
+            footer {{
+                text-align: center;
+                margin-top: 3rem;
+                font-size: 0.8rem;
+                color: var(--text-muted);
+            }}
+
+            footer a {{
+                color: var(--accent-color);
+                text-decoration: none;
+            }}
+        </style>
+    </head>
+    <body>
+        <header>
+            <div class="logo-area">
+                <i class="fa-solid fa-server logo-icon"></i>
+                <h1>MCP Server Dashboard</h1>
+            </div>
+            <div class="status-badge">
+                <span class="status-dot"></span>
+                <span>Active</span>
+            </div>
+        </header>
+
+        <main>
+            <div class="grid-stats">
+                <!-- Running Status Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">System Info</span>
+                        <i class="fa-solid fa-gauge-high card-icon"></i>
+                    </div>
+                    <div>
+                        <div class="card-value" id="uptime">Loading...</div>
+                        <div class="card-desc">Uptime since last reboot</div>
+                    </div>
+                    <ul class="card-details-list">
+                        <li>
+                            <span>Auth Status</span>
+                            <span class="status-indicator" id="auth-status">...</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- SearXNG status card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">SearXNG Search API</span>
+                        <i class="fa-solid fa-magnifying-glass card-icon"></i>
+                    </div>
+                    <div>
+                        <div class="card-value" id="search-count">0</div>
+                        <div class="card-desc">Searches executed in current session</div>
+                    </div>
+                    <ul class="card-details-list">
+                        <li>
+                            <span>API Target</span>
+                            <span id="searxng-url" style="word-break: break-all; max-width: 150px; text-align: right;">Loading...</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Crawl4AI status card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Crawl4AI Engine</span>
+                        <i class="fa-solid fa-spider card-icon"></i>
+                    </div>
+                    <div>
+                        <div class="card-value" id="crawl-count">0</div>
+                        <div class="card-desc">Crawls executed in current session</div>
+                    </div>
+                    <ul class="card-details-list">
+                        <li>
+                            <span>Engine Mode</span>
+                            <span class="active-text">Playwright (Chromium)</span>
+                        </li>
+                    </ul>
+                </div>
+
+                <!-- Cloudflare status card -->
+                <div class="card">
+                    <div class="card-header">
+                        <span class="card-title">Cloudflare Tunnel</span>
+                        <i class="fa-solid fa-cloud-bolt card-icon"></i>
+                    </div>
+                    <div>
+                        <div class="card-value" id="tunnel-status" class="inactive-text">Loading...</div>
+                        <div class="card-desc">Bypass GFW Tunnel Connection</div>
+                    </div>
+                    <ul class="card-details-list">
+                        <li>
+                            <span>Status</span>
+                            <span id="tunnel-indicator">...</span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Client Config block -->
+            <div class="config-section">
+                <div class="config-header">
+                    <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop Config Helper</span>
+                    <button class="copy-btn" onclick="copyConfig()"><i class="fa-solid fa-copy"></i> Copy Configuration</button>
+                </div>
+                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;">
+                    Insert this block into your local <code>claude_desktop_config.json</code> under the <code>mcpServers</code> object:
+                </p>
+                <pre id="json-config">{{
+  "mcpServers": {{
+    "hf-search-crawl-mcp": {{
+      "url": "{sse_url}",
+      "headers": {{
+        "Authorization": "Bearer YOUR_BEARER_TOKEN"
+      }}
+    }}
+  }}
+}}</pre>
+            </div>
+        </main>
+
+        <footer>
+            <p>Model Context Protocol Server | Running on Hugging Face Spaces | Powered by <a href="https://github.com/khc8655/xng" target="_blank">khc8655/xng</a></p>
+        </footer>
+
+        <script>
+            async function fetchStats() {{
+                try {{
+                    const res = await fetch('/api/stats');
+                    if (!res.ok) return;
+                    const data = await res.json();
+                    
+                    // Update DOM
+                    document.getElementById('uptime').textContent = data.uptime;
+                    document.getElementById('search-count').textContent = data.stats.searches;
+                    document.getElementById('crawl-count').textContent = data.stats.crawls;
+                    document.getElementById('searxng-url').textContent = data.searxng_url;
+                    
+                    // Auth indicator
+                    const authIndicator = document.getElementById('auth-status');
+                    if (data.auth_enabled) {{
+                        authIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-shield-halved"></i> Enabled</span>';
+                    }} else {{
+                        authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> Unsecured</span>';
+                    }}
+                    
+                    // Tunnel status
+                    const tunnelStatus = document.getElementById('tunnel-status');
+                    const tunnelIndicator = document.getElementById('tunnel-indicator');
+                    if (data.tunnel_connected) {{
+                        tunnelStatus.textContent = "ONLINE";
+                        tunnelStatus.className = "card-value active-text";
+                        tunnelIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-link"></i> Connected</span>';
+                    }} else {{
+                        tunnelStatus.textContent = "OFFLINE";
+                        tunnelStatus.className = "card-value inactive-text";
+                        tunnelIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-link-slash"></i> Direct Only</span>';
+                    }}
+                }} catch (e) {{
+                    console.error("Failed fetching statistics", e);
+                }}
+            }}
+
+            function copyConfig() {{
+                const configText = document.getElementById('json-config').textContent;
+                navigator.clipboard.writeText(configText).then(() => {{
+                    const btn = document.querySelector('.copy-btn');
+                    const origHtml = btn.innerHTML;
+                    btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+                    setTimeout(() => {{
+                        btn.innerHTML = origHtml;
+                    }}, 2000);
+                }}).catch(err => {{
+                    alert("Failed to copy: " + err);
+                }});
+            }}
+
+            // Poll every 3 seconds
+            fetchStats();
+            setInterval(fetchStats, 3000);
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
