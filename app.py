@@ -217,6 +217,7 @@ async def dashboard(request: Request):
     host = request.headers.get("host", "your-space-name.hf.space")
     proto = request.headers.get("x-forwarded-proto", "https")
     sse_url = f"{proto}://{host}/sse"
+    token_val = BEARER_TOKEN if BEARER_TOKEN else "YOUR_TOKEN_HERE"
     
     html_content = f"""
     <!DOCTYPE html>
@@ -450,6 +451,29 @@ async def dashboard(request: Request):
                 background: rgba(59, 130, 246, 0.3);
             }}
 
+            .tab-btn {{
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid var(--card-border);
+                color: var(--text-muted);
+                padding: 0.4rem 0.8rem;
+                border-radius: 6px;
+                cursor: pointer;
+                font-size: 0.85rem;
+                font-weight: 500;
+                transition: all 0.2s;
+            }}
+
+            .tab-btn:hover {{
+                background: rgba(255, 255, 255, 0.1);
+                color: var(--text-main);
+            }}
+
+            .tab-btn.active {{
+                background: rgba(59, 130, 246, 0.2);
+                border-color: rgba(59, 130, 246, 0.4);
+                color: var(--accent-color);
+            }}
+
             pre {{
                 background: rgba(15, 23, 42, 0.8);
                 padding: 1rem;
@@ -548,21 +572,18 @@ async def dashboard(request: Request):
             <div class="config-section">
                 <div class="config-header">
                     <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop 客户端配置助手</span>
-                    <button class="copy-btn" onclick="copyConfig()"><i class="fa-solid fa-copy"></i> 复制 JSON 配置</button>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="tab-btn active" onclick="showTab('remote')">远程 SSE 桥接</button>
+                        <button class="tab-btn" onclick="showTab('local')">本地 Stdio 命令行</button>
+                    </div>
                 </div>
-                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;">
-                    请将以下 JSON 配置段落复制并粘帖到您本地的 <code>claude_desktop_config.json</code> 中的 <code>mcpServers</code> 对象内：
+                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;" id="config-desc">
+                    推荐！使用 npx 桥接工具 mcp-remote 访问部署在 Hugging Face Spaces 上的远程服务：
                 </p>
-                <pre id="json-config">{{
-  "mcpServers": {{
-    "hf-search-crawl-mcp": {{
-      "url": "{sse_url}",
-      "headers": {{
-        "Authorization": "Bearer YOUR_BEARER_TOKEN"
-      }}
-    }}
-  }}
-}}</pre>
+                <div style="position: relative;">
+                    <pre id="json-config" style="padding-top: 2.5rem; min-height: 180px;"></pre>
+                    <button class="copy-btn" onclick="copyConfig()" style="position: absolute; right: 10px; top: 10px;"><i class="fa-solid fa-copy"></i> 复制配置</button>
+                </div>
             </div>
         </main>
 
@@ -571,6 +592,66 @@ async def dashboard(request: Request):
         </footer>
 
         <script>
+            // Config Templates
+            const remoteConfig = `{{
+  "mcpServers": {{
+    "hf-search-crawl-mcp": {{
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "{sse_url}?token={token_val}"
+      ]
+    }}
+  }}
+}}}}`;
+
+            const localConfig = `{{
+  "mcpServers": {{
+    "local-search-crawl-mcp": {{
+      "command": "/Users/xk/Documents/mcp/.venv/bin/python3",
+      "args": [
+        "/Users/xk/Documents/mcp/app.py"
+      ],
+      "env": {{
+        "BEARER_TOKEN": "{token_val}",
+        "SEARXNG_URL": "https://searxng.site"
+      }}
+    }}
+  }}
+}}}}`;
+
+            let currentTab = 'remote';
+
+            function updateConfigDisplay() {{
+                const configPre = document.getElementById('json-config');
+                const desc = document.getElementById('config-desc');
+                
+                if (currentTab === 'remote') {{
+                    configPre.textContent = remoteConfig;
+                    desc.innerHTML = '使用 <code>mcp-remote</code> 桥接工具连接部署在 Hugging Face 的远程服务器（无需本地配置 Python 环境）：';
+                }} else {{
+                    configPre.textContent = localConfig;
+                    desc.innerHTML = '在您本地的 macOS 电脑上直接使用虚拟环境中的 Python 执行（极速、低延迟、纯本地运行）：';
+                }}
+            }}
+
+            function showTab(tab) {{
+                currentTab = tab;
+                document.querySelectorAll('.tab-btn').forEach(btn => {{
+                    btn.classList.remove('active');
+                }});
+                
+                // Highlight active button
+                const btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => {{
+                    if (tab === 'remote') return b.textContent.includes('远程');
+                    return b.textContent.includes('本地');
+                }});
+                if (btn) btn.classList.add('active');
+                
+                updateConfigDisplay();
+            }}
+
             async function fetchStats() {{
                 try {{
                     const res = await fetch('/api/stats');
@@ -610,7 +691,8 @@ async def dashboard(request: Request):
                 }});
             }}
 
-            // Poll every 3 seconds
+            // Initial display and poll every 3 seconds
+            updateConfigDisplay();
             fetchStats();
             setInterval(fetchStats, 3000);
         </script>
@@ -618,3 +700,6 @@ async def dashboard(request: Request):
     </html>
     """
     return html_content
+
+if __name__ == "__main__":
+    mcp.run()
