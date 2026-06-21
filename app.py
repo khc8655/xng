@@ -147,14 +147,8 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Ensure the MCP session manager starts/stops with the app
-    async with mcp.session_manager.run():
-        yield
-
-# Create FastAPI app with lifespan manager
-app = FastAPI(title="SearXNG Crawl MCP Server", lifespan=lifespan)
+# Create FastAPI app
+app = FastAPI(title="SearXNG Crawl MCP Server")
 
 class TokenAuthMiddleware:
     def __init__(self, app):
