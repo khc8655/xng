@@ -717,6 +717,7 @@ async def dashboard(request: Request):
             const sseConfig = `{{
   "mcpServers": {{
     "hf-search-crawl-mcp": {{
+      "type": "sse",
       "url": "{sse_url}?token={token_val}"
     }}
   }}
