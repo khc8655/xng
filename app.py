@@ -194,18 +194,32 @@ class TokenAuthMiddleware:
 
         # Rewrite paths for backwards compatibility with old client configurations
         if path == "/sse":
-            scope["path"] = "/mcp/sse"
             path = "/mcp/sse"
         elif path == "/sse/":
-            scope["path"] = "/mcp/sse/"
             path = "/mcp/sse/"
         elif path == "/messages":
-            scope["path"] = "/mcp/messages"
             path = "/mcp/messages"
         elif path.startswith("/messages/"):
-            new_path = "/mcp" + path
-            scope["path"] = new_path
-            path = new_path
+            path = "/mcp" + path
+
+        scope["path"] = path
+
+        # Intercept and route /mcp/sse endpoints inside the middleware
+        if path in ["/mcp/sse", "/mcp/sse/"]:
+            if method == "POST":
+                # Route POST requests on SSE endpoint (Streamable HTTP) to the handler
+                scope["path"] = "/mcp"
+                await streamable_http_asgi_app(scope, receive, logging_send)
+                return
+            elif method == "GET":
+                headers = dict(scope.get("headers", []))
+                session_id = headers.get(b"mcp-session-id")
+                if session_id:
+                    # Route GET request with mcp-session-id to Streamable HTTP handler
+                    scope["path"] = "/mcp"
+                    await streamable_http_asgi_app(scope, receive, logging_send)
+                    return
+                # Otherwise, let it fall through to the native SSE mount handler normally
 
         from urllib.parse import parse_qs
         
@@ -268,45 +282,11 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
-class EmptyResponse(Response):
-    async def __call__(self, scope, receive, send):
-        pass
-
 # Initialize Streamable HTTP application
 streamable_http_asgi_app = mcp.streamable_http_app()
 
 # Initialize native FastMCP SSE app instance once to maintain session states
 sse_asgi_app = mcp.sse_app()
-
-@app.post("/mcp/sse")
-@app.post("/mcp/sse/")
-async def post_mcp_sse(request: Request):
-    # Route POST requests on SSE endpoint to the Streamable HTTP transport handler.
-    # We must rewrite scope["path"] to "/mcp" so that the streamable_http_app routes it to its root endpoint.
-    scope = request.scope
-    scope["path"] = "/mcp"
-    await streamable_http_asgi_app(scope, request.receive, request._send)
-    return EmptyResponse()
-
-@app.get("/mcp/sse")
-@app.get("/mcp/sse/")
-async def get_mcp_sse(request: Request):
-    # Check if this GET request is for Streamable HTTP or standard SSE.
-    # If the mcp-session-id header is present, it's a Streamable HTTP request.
-    # Otherwise, it's a standard SSE request.
-    headers = dict(request.headers)
-    session_id = headers.get("mcp-session-id")
-    
-    if session_id:
-        scope = request.scope
-        scope["path"] = "/mcp"
-        await streamable_http_asgi_app(scope, request.receive, request._send)
-    else:
-        scope = request.scope
-        scope["path"] = "/sse"
-        await sse_asgi_app(scope, request.receive, request._send)
-        
-    return EmptyResponse()
 
 # Mount native FastMCP SSE app
 app.mount("/mcp", sse_asgi_app)
