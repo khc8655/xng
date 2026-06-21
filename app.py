@@ -175,8 +175,12 @@ class TokenAuthMiddleware:
             return
 
         path = scope.get("path", "")
+        method = scope.get("method", "")
+        from urllib.parse import parse_qs
+        
         # Exclude paths from authentication check
         if path in ["/", "/health", "/api/stats"] or path.startswith("/mcp/messages"):
+            logger.info(f"Auth bypass: {method} {path}")
             await self.app(scope, receive, send)
             return
 
@@ -198,20 +202,23 @@ class TokenAuthMiddleware:
             
             # 2. Check token query parameter
             if not token and query_string:
-                from urllib.parse import parse_qs
                 params = parse_qs(query_string)
                 token_list = params.get("token")
                 if token_list:
                     token = token_list[0]
 
             if not token:
+                logger.warning(f"Auth failed (Missing Token): {method} {path} | Query keys: {list(parse_qs(query_string).keys()) if query_string else []}")
                 await self.send_error(send, 401, "Missing Authorization Token")
                 return
 
             if token != BEARER_TOKEN:
+                masked_token = token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
+                logger.warning(f"Auth failed (Invalid Token '{masked_token}'): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
 
+        logger.info(f"Auth success: {method} {path}")
         await self.app(scope, receive, send)
 
     async def send_error(self, send, status_code, message):
