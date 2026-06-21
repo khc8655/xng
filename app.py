@@ -164,8 +164,10 @@ app.mount("/messages/", app=transport.handle_post_message)
 
 @app.middleware("http")
 async def verify_bearer_token(request: Request, call_next):
-    # Exclude root path, assets, stats, and health check from token check
-    if request.url.path in ["/", "/health", "/api/stats"]:
+    # Exclude root path, assets, stats, health check, and SSE message endpoints from token check.
+    # The SSE message endpoint (/messages/) is secure because it requires a cryptographically secure,
+    # unguessable session_id created during the authenticated /sse connection.
+    if request.url.path in ["/", "/health", "/api/stats"] or request.url.path.startswith("/messages/"):
         return await call_next(request)
         
     if BEARER_TOKEN:
