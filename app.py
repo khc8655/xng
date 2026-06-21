@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 logging.basicConfig(level=logging.INFO)
@@ -24,8 +25,13 @@ search_count = 0
 crawl_count = 0
 start_time = time.time()
 
-# 1. Initialize FastMCP
-mcp = FastMCP("Search & Crawl Server")
+# 1. Initialize FastMCP with DNS rebinding protection disabled for cloud/proxy deployments
+mcp = FastMCP(
+    "Search & Crawl Server",
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False
+    )
+)
 
 # 2. Define SearXNG search tool
 @mcp.tool()
