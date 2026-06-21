@@ -9,6 +9,7 @@ from markdownify import markdownify as md
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
@@ -64,8 +65,8 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     except Exception as e:
         return f"Error executing search query: {str(e)}"
 
-# 3. Define Crawl tool (using lightweight HTTP client + markdown converter)
-async def fetch_and_convert_to_markdown(url: str) -> str:
+# 3. Define Crawl tool with Crawl4AI + Fallback
+async def fallback_crawl(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
@@ -75,8 +76,6 @@ async def fetch_and_convert_to_markdown(url: str) -> str:
             raise Exception(f"HTTP status code {response.status_code}")
             
         soup = BeautifulSoup(response.text, "html.parser")
-        
-        # Remove elements that are noise
         for element in soup(["script", "style", "noscript", "iframe", "header", "footer", "nav"]):
             element.decompose()
             
@@ -89,15 +88,33 @@ async def fetch_and_convert_to_markdown(url: str) -> str:
 async def crawl_page(url: str) -> str:
     """
     Crawls a web page and returns its content in clean Markdown format.
+    Uses Crawl4AI (Chromium) as primary and falls back to HTTP parser if it fails.
     Args:
         url: The absolute URL of the web page to crawl.
     """
     try:
-        logger.info(f"Crawling page: {url}")
-        text = await fetch_and_convert_to_markdown(url)
-        if not text:
-            return "Webpage parsed, but no content was extracted."
-        return text
+        logger.info(f"Crawling with Crawl4AI: {url}")
+        browser_conf = BrowserConfig(
+            headless=True,
+            extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+        )
+        run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+        
+        async with AsyncWebCrawler(config=browser_conf) as crawler:
+            result = await crawler.arun(url=url, config=run_conf)
+            if result.success and result.markdown:
+                return result.markdown
+            else:
+                err_msg = result.error_message or "Unknown failure"
+                logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
+    except Exception as e:
+        logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
+
+    # Fallback execution
+    try:
+        logger.info(f"Executing fallback crawler: {url}")
+        text = await fallback_crawl(url)
+        return f"*(Fallback Parser Output)*\n\n{text}"
     except Exception as e:
         return f"Error crawling page '{url}': {str(e)}"
 
