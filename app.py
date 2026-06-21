@@ -9,7 +9,6 @@ from markdownify import markdownify as md
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.sse import SseServerTransport
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
@@ -65,8 +64,8 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     except Exception as e:
         return f"Error executing search query: {str(e)}"
 
-# 3. Define Crawl tool
-async def fallback_crawl(url: str) -> str:
+# 3. Define Crawl tool (using lightweight HTTP client + markdown converter)
+async def fetch_and_convert_to_markdown(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
@@ -90,33 +89,15 @@ async def fallback_crawl(url: str) -> str:
 async def crawl_page(url: str) -> str:
     """
     Crawls a web page and returns its content in clean Markdown format.
-    Uses Crawl4AI (Chromium) as primary and falls back to HTTP parser if it fails.
     Args:
         url: The absolute URL of the web page to crawl.
     """
     try:
-        logger.info(f"Crawling with Crawl4AI: {url}")
-        browser_conf = BrowserConfig(
-            headless=True,
-            extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
-        )
-        run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-        
-        async with AsyncWebCrawler(config=browser_conf) as crawler:
-            result = await crawler.arun(url=url, config=run_conf)
-            if result.success and result.markdown:
-                return result.markdown
-            else:
-                err_msg = result.error_message or "Unknown failure"
-                logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
-    except Exception as e:
-        logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
-
-    # Fallback execution
-    try:
-        logger.info(f"Executing fallback crawler: {url}")
-        text = await fallback_crawl(url)
-        return f"*(Fallback Parser Output)*\n\n{text}"
+        logger.info(f"Crawling page: {url}")
+        text = await fetch_and_convert_to_markdown(url)
+        if not text:
+            return "Webpage parsed, but no content was extracted."
+        return text
     except Exception as e:
         return f"Error crawling page '{url}': {str(e)}"
 
@@ -126,11 +107,10 @@ transport = SseServerTransport("/messages/")
 async def handle_sse(request: Request):
     async with transport.connect_sse(request.scope, request.receive, request._send) as (in_stream, out_stream):
         await mcp._mcp_server.run(in_stream, out_stream, mcp._mcp_server.create_initialization_options())
-    # Return empty response to prevent Starlette error
     return Response()
 
 # Create FastAPI app
-app = FastAPI(title="SearXNG Crawl4AI MCP Server")
+app = FastAPI(title="SearXNG Crawl MCP Server")
 
 # Mount transport handlers
 app.add_route("/sse", handle_sse, methods=["GET"])

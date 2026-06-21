@@ -1,8 +1,7 @@
-FROM mcr.microsoft.com/playwright/python:v1.44.0-jammy
+FROM python:3.11-slim
 
 # Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
