@@ -239,6 +239,14 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
+@app.post("/mcp/sse")
+@app.post("/mcp/sse/")
+async def debug_post_sse(request: Request):
+    body = await request.body()
+    body_str = body.decode("utf-8", errors="ignore")
+    logger.info(f"DEBUG: POST /mcp/sse received! Body: {body_str}")
+    return JSONResponse({"status": "received", "body": body_str})
+
 # Mount native FastMCP SSE app
 app.mount("/mcp", mcp.sse_app())
 
