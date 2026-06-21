@@ -37,11 +37,16 @@ mcp = FastMCP(
 @mcp.tool()
 async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     """
-    Search the web using SearXNG.
+    Search the web using SearXNG to find web pages, answers, news, documents, or articles relevant to the query.
+    Use this tool as the first step to search the web for any questions or topics that require real-time information or web results.
+
     Args:
-        query: The search query.
-        engines: Optional comma-separated list of engines to query (e.g. google, bing, duckduckgo, wikipedia).
-        page: Page number for search results.
+        query: The search query string. Keep it concise but descriptive.
+        engines: Optional comma-separated list of engines to query (e.g. google, bing, duckduckgo, wikipedia, github, arxiv, reddit). Recommended to leave empty to search all default engines.
+        page: Page number for search results (starts at 1). Useful for pagination/fetching more results.
+        
+    Returns:
+        A markdown formatted list of top search results (up to 10), each containing the index, title (linked to the page), source engine, and a brief content snippet.
     """
     global search_count
     search_count += 1
@@ -103,10 +108,14 @@ async def fallback_crawl(url: str) -> str:
 @mcp.tool()
 async def crawl_page(url: str) -> str:
     """
-    Crawls a web page and returns its content in clean Markdown format.
-    Uses Crawl4AI (Chromium) as primary and falls back to HTTP parser if it fails.
+    Crawls a specific web page by its URL and extracts its main textual content, converting it into clean, readable Markdown format.
+    Use this tool when you have a specific URL (e.g., from search results) and need to read the full body content, documentation, blog post, or article. Do NOT use this tool for search queries (use `search_web` instead).
+
     Args:
-        url: The absolute URL of the web page to crawl.
+        url: The absolute HTTP/HTTPS URL of the web page to crawl. Must start with http:// or https://.
+        
+    Returns:
+        The full readable content of the webpage represented as clean Markdown, with headers, lists, links, and body text preserved, while removing boilerplate like navigation, headers, footers, scripts, and styles.
     """
     global crawl_count
     crawl_count += 1
@@ -590,14 +599,16 @@ async def dashboard(request: Request):
                         <i class="fa-solid fa-spider card-icon"></i>
                     </div>
                     <div>
-                                           <ul class="card-details-list">
+                        <div class="card-value" id="crawl-count">0</div>
+                        <div class="card-desc">本次会话累计执行的网页抓取次数</div>
+                    </div>
+                    <ul class="card-details-list">
                         <li>
                             <span>爬虫引擎</span>
                             <span class="active-text">Playwright (Chromium)</span>
                         </li>
                     </ul>
                 </div>
-            </div>
 
             <!-- Client Config block -->
             <div class="config-section">
@@ -612,6 +623,10 @@ async def dashboard(request: Request):
                 <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;" id="config-desc">
                     无痛直连！如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可，完全无需本地下载安装任何依赖：
                 </p>
+                <div style="font-size: 0.825rem; color: var(--warning-color); border: 1px solid rgba(245, 158, 11, 0.2); background: rgba(245, 158, 11, 0.05); padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                    <i class="fa-solid fa-triangle-exclamation"></i>
+                    <span><strong>提示:</strong> 请将配置中的 <code>YOUR_BEARER_TOKEN</code> 替换为您在 Hugging Face Space 中配置的实际 <code>BEARER_TOKEN</code> 密钥。</span>
+                </div>
                 <div style="position: relative;">
                     <pre id="json-config" style="padding-top: 2.5rem; min-height: 180px;"></pre>
                     <button class="copy-btn" onclick="copyConfig()" style="position: absolute; right: 10px; top: 10px;"><i class="fa-solid fa-copy"></i> 复制配置</button>
