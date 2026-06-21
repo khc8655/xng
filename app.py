@@ -176,6 +176,22 @@ class TokenAuthMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "")
+        
+        # Rewrite paths for backwards compatibility with old client configurations
+        if path == "/sse":
+            scope["path"] = "/mcp/sse"
+            path = "/mcp/sse"
+        elif path == "/sse/":
+            scope["path"] = "/mcp/sse/"
+            path = "/mcp/sse/"
+        elif path == "/messages":
+            scope["path"] = "/mcp/messages"
+            path = "/mcp/messages"
+        elif path.startswith("/messages/"):
+            new_path = "/mcp" + path
+            scope["path"] = new_path
+            path = new_path
+
         from urllib.parse import parse_qs
         
         # Exclude paths from authentication check
