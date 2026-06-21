@@ -266,6 +266,10 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
+class EmptyResponse(Response):
+    async def __call__(self, scope, receive, send):
+        pass
+
 # Initialize Streamable HTTP application
 streamable_http_asgi_app = mcp.streamable_http_app()
 
@@ -277,7 +281,7 @@ async def post_mcp_sse(request: Request):
     scope = request.scope
     scope["path"] = "/mcp"
     await streamable_http_asgi_app(scope, request.receive, request._send)
-    return Response()
+    return EmptyResponse()
 
 # Mount native FastMCP SSE app
 app.mount("/mcp", mcp.sse_app())
