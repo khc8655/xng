@@ -131,15 +131,6 @@ async def crawl_page(url: str) -> str:
     except Exception as e:
         return f"Error crawling page '{url}': {str(e)}"
 
-# Helper to check if cloudflared process is active
-def is_tunnel_running() -> bool:
-    try:
-        # Check if cloudflared is running using pgrep
-        output = subprocess.check_output(["pgrep", "cloudflared"])
-        return len(output) > 0
-    except Exception:
-        return False
-
 # Uptime text generator
 def get_uptime() -> str:
     uptime_seconds = int(time.time() - start_time)
@@ -204,7 +195,6 @@ async def api_stats():
         "uptime": get_uptime(),
         "searxng_url": SEARXNG_URL,
         "auth_enabled": BEARER_TOKEN is not None,
-        "tunnel_connected": is_tunnel_running(),
         "stats": {
             "searches": search_count,
             "crawls": crawl_count
@@ -544,23 +534,6 @@ async def dashboard(request: Request):
                     </ul>
                 </div>
 
-                <!-- Cloudflare status card -->
-                <div class="card">
-                    <div class="card-header">
-                        <span class="card-title">Cloudflare Tunnel</span>
-                        <i class="fa-solid fa-cloud-bolt card-icon"></i>
-                    </div>
-                    <div>
-                        <div class="card-value" id="tunnel-status" class="inactive-text">Loading...</div>
-                        <div class="card-desc">Bypass GFW Tunnel Connection</div>
-                    </div>
-                    <ul class="card-details-list">
-                        <li>
-                            <span>Status</span>
-                            <span id="tunnel-indicator">...</span>
-                        </li>
-                    </ul>
-                </div>
             </div>
 
             <!-- Client Config block -->
@@ -610,18 +583,6 @@ async def dashboard(request: Request):
                         authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> Unsecured</span>';
                     }}
                     
-                    // Tunnel status
-                    const tunnelStatus = document.getElementById('tunnel-status');
-                    const tunnelIndicator = document.getElementById('tunnel-indicator');
-                    if (data.tunnel_connected) {{
-                        tunnelStatus.textContent = "ONLINE";
-                        tunnelStatus.className = "card-value active-text";
-                        tunnelIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-link"></i> Connected</span>';
-                    }} else {{
-                        tunnelStatus.textContent = "OFFLINE";
-                        tunnelStatus.className = "card-value inactive-text";
-                        tunnelIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-link-slash"></i> Direct Only</span>';
-                    }}
                 }} catch (e) {{
                     console.error("Failed fetching statistics", e);
                 }}

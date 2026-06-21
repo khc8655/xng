@@ -13,17 +13,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Install cloudflared static binary (detects architecture: amd64 / arm64)
-RUN arch=$(uname -m) && \
-    if [ "$arch" = "x86_64" ]; then \
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -O /usr/local/bin/cloudflared; \
-    elif [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then \
-        wget -q https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64 -O /usr/local/bin/cloudflared; \
-    else \
-        echo "Unsupported architecture: $arch" && exit 1; \
-    fi && \
-    chmod +x /usr/local/bin/cloudflared
-
 # Create user with UID 1000
 RUN useradd -m -u 1000 user
 ENV HOME=/home/user \
@@ -36,7 +25,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Pre-install Playwright and Chromium dependencies (run as root before switching user)
-# We run chown afterwards to ensure the non-root user owns the downloaded browser binaries.
 RUN playwright install chromium && \
     playwright install-deps chromium && \
     chown -R user:user /home/user && \
