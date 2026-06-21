@@ -162,8 +162,14 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure the MCP session manager starts/stops with the app (required for Streamable HTTP transport)
+    async with mcp.session_manager.run():
+        yield
+
 # Create FastAPI app
-app = FastAPI(title="SearXNG Crawl MCP Server")
+app = FastAPI(title="SearXNG Crawl MCP Server", lifespan=lifespan)
 
 class TokenAuthMiddleware:
     def __init__(self, app):
@@ -261,31 +267,21 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
-# Initialize both ASGI applications from FastMCP
-sse_asgi_app = mcp.sse_app()
+# Initialize Streamable HTTP application
 streamable_http_asgi_app = mcp.streamable_http_app()
 
-async def mcp_dispatcher_app(scope, receive, send):
-    path = scope.get("path", "")
-    method = scope.get("method", "GET")
-    
-    if path.startswith("/messages"):
-        await sse_asgi_app(scope, receive, send)
-    elif path in ["/sse", "/sse/"]:
-        if method == "GET":
-            await sse_asgi_app(scope, receive, send)
-        else:
-            scope["path"] = "/"
-            await streamable_http_asgi_app(scope, receive, send)
-    else:
-        if method == "GET":
-            await sse_asgi_app(scope, receive, send)
-        else:
-            scope["path"] = "/"
-            await streamable_http_asgi_app(scope, receive, send)
+@app.post("/mcp/sse")
+@app.post("/mcp/sse/")
+async def post_mcp_sse(request: Request):
+    # Route POST requests on SSE endpoint to the Streamable HTTP transport handler.
+    # We must rewrite scope["path"] to "/mcp" so that the streamable_http_app routes it to its root endpoint.
+    scope = request.scope
+    scope["path"] = "/mcp"
+    await streamable_http_asgi_app(scope, request.receive, request._send)
+    return Response()
 
-# Mount the multi-transport dispatcher app under /mcp
-app.mount("/mcp", mcp_dispatcher_app)
+# Mount native FastMCP SSE app
+app.mount("/mcp", mcp.sse_app())
 
 @app.get("/health")
 async def health_check():
