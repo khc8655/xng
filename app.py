@@ -211,11 +211,11 @@ async def dashboard(request: Request):
     
     html_content = f"""
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="zh-CN">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>MCP Server Dashboard</title>
+        <title>MCP 服务监控面板</title>
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <style>
@@ -237,7 +237,7 @@ async def dashboard(request: Request):
             }}
 
             body {{
-                font-family: 'Inter', sans-serif;
+                font-family: 'Inter', system-ui, -apple-system, sans-serif;
                 background-color: var(--bg-primary);
                 background-image: radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 40%),
                                   radial-gradient(circle at 90% 80%, rgba(99, 102, 241, 0.08) 0%, transparent 40%);
@@ -470,29 +470,29 @@ async def dashboard(request: Request):
         <header>
             <div class="logo-area">
                 <i class="fa-solid fa-server logo-icon"></i>
-                <h1>MCP Server Dashboard</h1>
+                <h1>MCP 服务监控面板</h1>
             </div>
             <div class="status-badge">
                 <span class="status-dot"></span>
-                <span>Active</span>
+                <span>服务正常运行中</span>
             </div>
         </header>
 
         <main>
             <div class="grid-stats">
-                <!-- Running Status Card -->
+                <!-- System Status Card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">System Info</span>
+                        <span class="card-title">系统运行状态</span>
                         <i class="fa-solid fa-gauge-high card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value" id="uptime">Loading...</div>
-                        <div class="card-desc">Uptime since last reboot</div>
+                        <div class="card-value" id="uptime">加载中...</div>
+                        <div class="card-desc">自本次启动以来的运行时间</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
-                            <span>Auth Status</span>
+                            <span>密钥鉴权</span>
                             <span class="status-indicator" id="auth-status">...</span>
                         </li>
                     </ul>
@@ -501,17 +501,17 @@ async def dashboard(request: Request):
                 <!-- SearXNG status card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">SearXNG Search API</span>
+                        <span class="card-title">SearXNG 搜索引擎</span>
                         <i class="fa-solid fa-magnifying-glass card-icon"></i>
                     </div>
                     <div>
                         <div class="card-value" id="search-count">0</div>
-                        <div class="card-desc">Searches executed in current session</div>
+                        <div class="card-desc">本次会话累计执行的搜索次数</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
-                            <span>API Target</span>
-                            <span id="searxng-url" style="word-break: break-all; max-width: 150px; text-align: right;">Loading...</span>
+                            <span>接口地址</span>
+                            <span id="searxng-url" style="word-break: break-all; max-width: 170px; text-align: right;">加载中...</span>
                         </li>
                     </ul>
                 </div>
@@ -519,31 +519,30 @@ async def dashboard(request: Request):
                 <!-- Crawl4AI status card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">Crawl4AI Engine</span>
+                        <span class="card-title">Crawl4AI 网页爬虫</span>
                         <i class="fa-solid fa-spider card-icon"></i>
                     </div>
                     <div>
                         <div class="card-value" id="crawl-count">0</div>
-                        <div class="card-desc">Crawls executed in current session</div>
+                        <div class="card-desc">本次会话累计执行的爬取次数</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
-                            <span>Engine Mode</span>
+                            <span>爬虫引擎</span>
                             <span class="active-text">Playwright (Chromium)</span>
                         </li>
                     </ul>
                 </div>
-
             </div>
 
             <!-- Client Config block -->
             <div class="config-section">
                 <div class="config-header">
-                    <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop Config Helper</span>
-                    <button class="copy-btn" onclick="copyConfig()"><i class="fa-solid fa-copy"></i> Copy Configuration</button>
+                    <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop 客户端配置助手</span>
+                    <button class="copy-btn" onclick="copyConfig()"><i class="fa-solid fa-copy"></i> 复制 JSON 配置</button>
                 </div>
                 <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;">
-                    Insert this block into your local <code>claude_desktop_config.json</code> under the <code>mcpServers</code> object:
+                    请将以下 JSON 配置段落复制并粘帖到您本地的 <code>claude_desktop_config.json</code> 中的 <code>mcpServers</code> 对象内：
                 </p>
                 <pre id="json-config">{{
   "mcpServers": {{
@@ -559,7 +558,7 @@ async def dashboard(request: Request):
         </main>
 
         <footer>
-            <p>Model Context Protocol Server | Running on Hugging Face Spaces | Powered by <a href="https://github.com/khc8655/xng" target="_blank">khc8655/xng</a></p>
+            <p>Model Context Protocol Server | 运行于 Hugging Face Spaces | Powered by <a href="https://github.com/khc8655/xng" target="_blank">khc8655/xng</a></p>
         </footer>
 
         <script>
@@ -578,9 +577,9 @@ async def dashboard(request: Request):
                     // Auth indicator
                     const authIndicator = document.getElementById('auth-status');
                     if (data.auth_enabled) {{
-                        authIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-shield-halved"></i> Enabled</span>';
+                        authIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-shield-halved"></i> 已启用</span>';
                     }} else {{
-                        authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> Unsecured</span>';
+                        authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> 未启用</span>';
                     }}
                     
                 }} catch (e) {{
@@ -593,12 +592,12 @@ async def dashboard(request: Request):
                 navigator.clipboard.writeText(configText).then(() => {{
                     const btn = document.querySelector('.copy-btn');
                     const origHtml = btn.innerHTML;
-                    btn.innerHTML = '<i class="fa-solid fa-check"></i> Copied!';
+                    btn.innerHTML = '<i class="fa-solid fa-check"></i> 已复制！';
                     setTimeout(() => {{
                         btn.innerHTML = origHtml;
                     }}, 2000);
                 }}).catch(err => {{
-                    alert("Failed to copy: " + err);
+                    alert("复制失败: " + err);
                 }});
             }}
 
