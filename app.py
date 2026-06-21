@@ -223,8 +223,8 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
-# Mount native FastMCP SSE app with mount_path prefix
-app.mount("/mcp", mcp.sse_app(mount_path="/mcp"))
+# Mount native FastMCP SSE app
+app.mount("/mcp", mcp.sse_app())
 
 @app.get("/health")
 async def health_check():
