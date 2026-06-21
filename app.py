@@ -255,16 +255,31 @@ class TokenAuthMiddleware:
 
 app.add_middleware(TokenAuthMiddleware)
 
-@app.post("/mcp/sse")
-@app.post("/mcp/sse/")
-async def debug_post_sse(request: Request):
-    body = await request.body()
-    body_str = body.decode("utf-8", errors="ignore")
-    logger.info(f"DEBUG: POST /mcp/sse received! Body: {body_str}")
-    return JSONResponse({"status": "received", "body": body_str})
+# Initialize both ASGI applications from FastMCP
+sse_asgi_app = mcp.sse_app()
+streamable_http_asgi_app = mcp.streamable_http_app()
 
-# Mount native FastMCP SSE app
-app.mount("/mcp", mcp.sse_app())
+async def mcp_dispatcher_app(scope, receive, send):
+    path = scope.get("path", "")
+    method = scope.get("method", "GET")
+    
+    if path.startswith("/messages"):
+        await sse_asgi_app(scope, receive, send)
+    elif path in ["/sse", "/sse/"]:
+        if method == "GET":
+            await sse_asgi_app(scope, receive, send)
+        else:
+            scope["path"] = "/"
+            await streamable_http_asgi_app(scope, receive, send)
+    else:
+        if method == "GET":
+            await sse_asgi_app(scope, receive, send)
+        else:
+            scope["path"] = "/"
+            await streamable_http_asgi_app(scope, receive, send)
+
+# Mount the multi-transport dispatcher app under /mcp
+app.mount("/mcp", mcp_dispatcher_app)
 
 @app.get("/health")
 async def health_check():
