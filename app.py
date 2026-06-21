@@ -275,6 +275,9 @@ class EmptyResponse(Response):
 # Initialize Streamable HTTP application
 streamable_http_asgi_app = mcp.streamable_http_app()
 
+# Initialize native FastMCP SSE app instance once to maintain session states
+sse_asgi_app = mcp.sse_app()
+
 @app.post("/mcp/sse")
 @app.post("/mcp/sse/")
 async def post_mcp_sse(request: Request):
@@ -301,12 +304,12 @@ async def get_mcp_sse(request: Request):
     else:
         scope = request.scope
         scope["path"] = "/sse"
-        await mcp.sse_app()(scope, request.receive, request._send)
+        await sse_asgi_app(scope, request.receive, request._send)
         
     return EmptyResponse()
 
 # Mount native FastMCP SSE app
-app.mount("/mcp", mcp.sse_app())
+app.mount("/mcp", sse_asgi_app)
 
 @app.get("/health")
 async def health_check():
