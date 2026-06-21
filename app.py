@@ -170,14 +170,21 @@ async def verify_bearer_token(request: Request, call_next):
         
     if BEARER_TOKEN:
         auth_header = request.headers.get("Authorization")
-        if not auth_header:
-            return JSONResponse(status_code=401, content={"detail": "Missing Authorization Header"})
+        query_token = request.query_params.get("token")
+        
+        token = None
+        if auth_header:
+            parts = auth_header.split()
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                token = parts[1]
+            else:
+                token = auth_header
+        elif query_token:
+            token = query_token
             
-        parts = auth_header.split()
-        if len(parts) != 2 or parts[0].lower() != "bearer":
-            return JSONResponse(status_code=401, content={"detail": "Invalid Authorization Header Format"})
+        if not token:
+            return JSONResponse(status_code=401, content={"detail": "Missing Authorization Token"})
             
-        token = parts[1]
         if token != BEARER_TOKEN:
             return JSONResponse(status_code=403, content={"detail": "Invalid Bearer Token"})
             
