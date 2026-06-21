@@ -186,7 +186,8 @@ class TokenAuthMiddleware:
         async def logging_send(message):
             if message["type"] == "http.response.start":
                 status_code = message.get("status", 200)
-                logger.info(f"HTTP Response: {method} {path} -> Status {status_code}")
+                if status_code >= 400:
+                    logger.warning(f"HTTP Response Error: {method} {path} -> Status {status_code}")
             await send(message)
 
         # Rewrite paths for backwards compatibility with old client configurations
@@ -208,7 +209,6 @@ class TokenAuthMiddleware:
         
         # Exclude paths from authentication check
         if path in ["/", "/health", "/api/stats"] or path.startswith("/mcp/messages"):
-            logger.info(f"Auth bypass: {method} {path}")
             await self.app(scope, receive, logging_send)
             return
 
@@ -246,7 +246,6 @@ class TokenAuthMiddleware:
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
 
-        logger.info(f"Auth success: {method} {path}")
         await self.app(scope, receive, logging_send)
 
     async def send_error(self, send, status_code, message):
