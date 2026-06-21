@@ -590,23 +590,27 @@ async def dashboard(request: Request):
                         <i class="fa-solid fa-spider card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value" id="crawl-count">0</div>
-                        <div class="card-desc">本次会话累计执行的爬取次数</div>
-                    </div>
-                    <ul class="card-details-list">
+                                           <ul class="card-details-list">
                         <li>
                             <span>爬虫引擎</span>
-                <!-- Client Config block -->
+                            <span class="active-text">Playwright (Chromium)</span>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Client Config block -->
             <div class="config-section">
                 <div class="config-header">
-                    <span class="config-title"><i class="fa-solid fa-cog"></i> Claude Desktop 客户端配置助手</span>
+                    <span class="config-title"><i class="fa-solid fa-cog"></i> 客户端 Agent 连接配置配置助手</span>
                     <div style="display: flex; gap: 0.5rem;">
-                        <button class="tab-btn active" onclick="showTab('node')">Node.js 全局桥接 (推荐)</button>
-                        <button class="tab-btn" onclick="showTab('python')">Python 极速桥接</button>
+                        <button class="tab-btn active" onclick="showTab('sse')">原生 SSE 直连 (推荐 - 零依赖)</button>
+                        <button class="tab-btn" onclick="showTab('node')">Node.js Stdio 桥接</button>
+                        <button class="tab-btn" onclick="showTab('python')">Python Stdio 桥接</button>
                     </div>
                 </div>
                 <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;" id="config-desc">
-                    推荐！在本地终端执行 <code>npm install -g mcp-remote</code> 进行全局安装，以获得极速启动且免下载的桥接体验：
+                    无痛直连！如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可，完全无需本地下载安装任何依赖：
                 </p>
                 <div style="position: relative;">
                     <pre id="json-config" style="padding-top: 2.5rem; min-height: 180px;"></pre>
@@ -621,6 +625,14 @@ async def dashboard(request: Request):
 
         <script>
             // Config Templates
+            const sseConfig = `{{
+  "mcpServers": {{
+    "hf-search-crawl-mcp": {{
+      "url": "{sse_url}?token={token_val}"
+    }}
+  }}
+}}`;
+
             const nodeConfig = `{{
   "mcpServers": {{
     "hf-search-crawl-mcp": {{
@@ -645,18 +657,21 @@ async def dashboard(request: Request):
   }}
 }}`;
 
-            let currentTab = 'node';
+            let currentTab = 'sse';
 
             function updateConfigDisplay() {{
                 const configPre = document.getElementById('json-config');
                 const desc = document.getElementById('config-desc');
                 
-                if (currentTab === 'node') {{
+                if (currentTab === 'sse') {{
+                    configPre.textContent = sseConfig;
+                    desc.innerHTML = '无痛直连！如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可，完全无需本地下载安装任何依赖：';
+                }} else if (currentTab === 'node') {{
                     configPre.textContent = nodeConfig;
-                    desc.innerHTML = '推荐！在本地终端执行 <code>npm install -g mcp-remote</code> 全局安装桥接器，启动极速且完全免去 npx 每次运行时耗时在线检查的开销：';
+                    desc.innerHTML = '对于仅支持 Stdio (标准输入输出) 的客户端（如 Claude Desktop），建议在本地全局安装桥接器：<code>npm install -g mcp-remote</code>，以极速运行，免去 npx 每次运行时在线检查的开销：';
                 }} else {{
                     configPre.textContent = pythonConfig;
-                    desc.innerHTML = '免 Node 环境！在本地环境执行 <code>pip install mcp</code>，利用 Python SDK 自带的连接器直接运行，瞬间拉起连接：';
+                    desc.innerHTML = '免 Node 环境！对于仅支持 Stdio 的客户端，您可在本地环境执行 <code>pip install mcp</code>，利用 Python SDK 自带的连接器快速桥接：';
                 }}
             }}
 
@@ -668,6 +683,7 @@ async def dashboard(request: Request):
                 
                 // Highlight active button
                 const btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => {{
+                    if (tab === 'sse') return b.textContent.includes('原生');
                     if (tab === 'node') return b.textContent.includes('Node');
                     return b.textContent.includes('Python');
                 }});
