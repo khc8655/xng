@@ -3,6 +3,7 @@ import logging
 import re
 import time
 import subprocess
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, HTMLResponse
 import httpx
@@ -10,7 +11,6 @@ from bs4 import BeautifulSoup
 from markdownify import markdownify as md
 
 from mcp.server.fastmcp import FastMCP
-from mcp.server.sse import SseServerTransport
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 logging.basicConfig(level=logging.INFO)
@@ -147,50 +147,84 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
-# 4. Setup SSE Transport
-transport = SseServerTransport("/messages/")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Ensure the MCP session manager starts/stops with the app
+    async with mcp.session_manager.run():
+        yield
 
-async def handle_sse(request: Request):
-    async with transport.connect_sse(request.scope, request.receive, request._send) as (in_stream, out_stream):
-        await mcp._mcp_server.run(in_stream, out_stream, mcp._mcp_server.create_initialization_options())
-    return Response()
+# Create FastAPI app with lifespan manager
+app = FastAPI(title="SearXNG Crawl MCP Server", lifespan=lifespan)
 
-# Create FastAPI app
-app = FastAPI(title="SearXNG Crawl MCP Server")
+class TokenAuthMiddleware:
+    def __init__(self, app):
+        self.app = app
 
-# Mount transport handlers
-app.add_route("/sse", handle_sse, methods=["GET"])
-app.mount("/messages/", app=transport.handle_post_message)
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-@app.middleware("http")
-async def verify_bearer_token(request: Request, call_next):
-    # Exclude root path, assets, stats, health check, and SSE message endpoints from token check.
-    # The SSE message endpoint (/messages/) is secure because it requires a cryptographically secure,
-    # unguessable session_id created during the authenticated /sse connection.
-    if request.url.path in ["/", "/health", "/api/stats"] or request.url.path.startswith("/messages/"):
-        return await call_next(request)
-        
-    if BEARER_TOKEN:
-        auth_header = request.headers.get("Authorization")
-        query_token = request.query_params.get("token")
-        
-        token = None
-        if auth_header:
-            parts = auth_header.split()
-            if len(parts) == 2 and parts[0].lower() == "bearer":
-                token = parts[1]
-            else:
-                token = auth_header
-        elif query_token:
-            token = query_token
+        path = scope.get("path", "")
+        # Exclude paths from authentication check
+        if path in ["/", "/health", "/api/stats"] or path.startswith("/mcp/messages"):
+            await self.app(scope, receive, send)
+            return
+
+        if BEARER_TOKEN:
+            headers = dict(scope.get("headers", []))
+            query_string = scope.get("query_string", b"").decode("utf-8")
             
-        if not token:
-            return JSONResponse(status_code=401, content={"detail": "Missing Authorization Token"})
+            token = None
             
-        if token != BEARER_TOKEN:
-            return JSONResponse(status_code=403, content={"detail": "Invalid Bearer Token"})
+            # 1. Check Authorization header (HTTP headers in ASGI scope are lowercase bytes)
+            auth_header_bytes = headers.get(b"authorization", b"")
+            if auth_header_bytes:
+                auth_header = auth_header_bytes.decode("utf-8")
+                parts = auth_header.split()
+                if len(parts) == 2 and parts[0].lower() == "bearer":
+                    token = parts[1]
+                else:
+                    token = auth_header
             
-    return await call_next(request)
+            # 2. Check token query parameter
+            if not token and query_string:
+                from urllib.parse import parse_qs
+                params = parse_qs(query_string)
+                token_list = params.get("token")
+                if token_list:
+                    token = token_list[0]
+
+            if not token:
+                await self.send_error(send, 401, "Missing Authorization Token")
+                return
+
+            if token != BEARER_TOKEN:
+                await self.send_error(send, 403, "Invalid Bearer Token")
+                return
+
+        await self.app(scope, receive, send)
+
+    async def send_error(self, send, status_code, message):
+        import json
+        response_body = json.dumps({"detail": message}).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status_code,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(response_body)).encode("utf-8")),
+            ]
+        })
+        await send({
+            "type": "http.response.body",
+            "body": response_body,
+        })
+
+app.add_middleware(TokenAuthMiddleware)
+
+# Mount native FastMCP SSE app with mount_path prefix
+app.mount("/mcp", mcp.sse_app(mount_path="/mcp"))
 
 @app.get("/health")
 async def health_check():
@@ -216,7 +250,7 @@ async def dashboard(request: Request):
     # Dynamic host detection for config helper (checking X-Forwarded-Host from proxy)
     host = request.headers.get("x-forwarded-host", request.headers.get("host", "your-space-name.hf.space"))
     proto = request.headers.get("x-forwarded-proto", "https")
-    sse_url = f"{proto}://{host}/sse"
+    sse_url = f"{proto}://{host}/mcp/sse"
     token_val = "YOUR_BEARER_TOKEN"
     
     html_content = f"""
