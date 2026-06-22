@@ -650,7 +650,7 @@ async def lifespan(app: FastAPI):
                 logger.info("Global Crawl4AI AsyncWebCrawler closed.")
 
 # Create FastAPI app
-app = FastAPI(title="SearXNG Crawl MCP Server", lifespan=lifespan)
+app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
 
 class TokenAuthMiddleware:
     def __init__(self, app):
