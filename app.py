@@ -20,6 +20,24 @@ logger = logging.getLogger("mcp-server")
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 SEARXNG_URL = os.getenv("SEARXNG_URL", "https://searxng.site")
 
+# Chromium extra args for anti-abuse domain blocking (to prevent Hugging Face from flagging the space)
+BLOCKED_HOST_RULES = (
+    "MAP *.google-analytics.com 127.0.0.1, "
+    "MAP *.doubleclick.net 127.0.0.1, "
+    "MAP *.mmstat.com 127.0.0.1, "
+    "MAP *.alicdn.com 127.0.0.1, "
+    "MAP *.cloudflareinsights.com 127.0.0.1, "
+    "MAP challenges.cloudflare.com 127.0.0.1, "
+    "MAP cloudflare-ech.com 127.0.0.1, "
+    "MAP log.mmstat.com 127.0.0.1, "
+    "MAP xux-web-config.oss-accelerate.aliyuncs.com 127.0.0.1, "
+    "MAP googleads.g.doubleclick.net 127.0.0.1, "
+    "MAP *.googleadservices.com 127.0.0.1, "
+    "MAP *.googletagmanager.com 127.0.0.1, "
+    "MAP *.googletagservices.com 127.0.0.1, "
+    "MAP *.analytics.google.com 127.0.0.1"
+)
+
 # Global counters and startup time
 search_count = 0
 crawl_count = 0
@@ -515,7 +533,7 @@ async def crawl_page(url: str, query: str = None) -> str:
                 logger.warning(f"Global Crawl4AI crawler is not initialized. Using temporary crawler context: {url}")
                 browser_conf = BrowserConfig(
                     headless=True,
-                    extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+                    extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process", f"--host-rules={BLOCKED_HOST_RULES}"]
                 )
                 async with AsyncWebCrawler(config=browser_conf) as temp_crawler:
                     result = await temp_crawler.arun(url=url, config=run_conf)
@@ -604,7 +622,7 @@ async def lifespan(app: FastAPI):
         try:
             browser_conf = BrowserConfig(
                 headless=True,
-                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process", f"--host-rules={BLOCKED_HOST_RULES}"]
             )
             crawler = AsyncWebCrawler(config=browser_conf)
             await crawler.start()
