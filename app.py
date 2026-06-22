@@ -18,7 +18,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
-SEARXNG_URL = os.getenv("SEARXNG_URL", "https://searxng.site")
+
+def get_active_engines() -> str:
+    engines = []
+    if os.getenv("TAVILY_API_KEY"):
+        engines.append("Tavily")
+    if os.getenv("EXA_API_KEY"):
+        engines.append("Exa")
+    if os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_CX"):
+        engines.append("Google")
+    engines.append("DuckDuckGo (Free)")
+    return ", ".join(engines)
 
 # Chromium extra args for anti-abuse domain blocking (to prevent Hugging Face from flagging the space)
 BLOCKED_HOST_RULES = (
@@ -759,7 +769,7 @@ app.mount("/mcp", sse_asgi_app)
 
 @app.get("/health")
 async def health_check():
-    return {"status": "ok", "searxng_url": SEARXNG_URL, "auth_enabled": BEARER_TOKEN is not None}
+    return {"status": "ok", "active_engines": get_active_engines(), "auth_enabled": BEARER_TOKEN is not None}
 
 # API Endpoint to fetch current stats
 @app.get("/api/stats")
@@ -767,7 +777,7 @@ async def api_stats():
     return {
         "status": "online",
         "uptime": get_uptime(),
-        "searxng_url": SEARXNG_URL,
+        "active_engines": get_active_engines(),
         "auth_enabled": BEARER_TOKEN is not None,
         "stats": {
             "searches": search_count,
@@ -1096,10 +1106,10 @@ async def dashboard(request: Request):
                     </ul>
                 </div>
 
-                <!-- SearXNG status card -->
+                <!-- Search Gateway status card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">SearXNG 搜索引擎</span>
+                        <span class="card-title">搜索引擎网关</span>
                         <i class="fa-solid fa-magnifying-glass card-icon"></i>
                     </div>
                     <div>
@@ -1108,8 +1118,8 @@ async def dashboard(request: Request):
                     </div>
                     <ul class="card-details-list">
                         <li>
-                            <span>接口地址</span>
-                            <span id="searxng-url" style="word-break: break-all; max-width: 170px; text-align: right;">加载中...</span>
+                            <span>活跃搜索引擎</span>
+                            <span id="active-engines" style="word-break: break-all; max-width: 170px; text-align: right;">加载中...</span>
                         </li>
                     </ul>
                 </div>
@@ -1241,7 +1251,7 @@ async def dashboard(request: Request):
                     document.getElementById('uptime').textContent = data.uptime;
                     document.getElementById('search-count').textContent = data.stats.searches;
                     document.getElementById('crawl-count').textContent = data.stats.crawls;
-                    document.getElementById('searxng-url').textContent = data.searxng_url;
+                    document.getElementById('active-engines').textContent = data.active_engines;
                     
                     // Auth indicator
                     const authIndicator = document.getElementById('auth-status');
