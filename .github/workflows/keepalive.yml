@@ -2,8 +2,8 @@ name: HF Space Keepalive
 
 on:
   schedule:
-    # 每天的 UTC 时间 00:00 和 12:00 各运行一次（每 12 小时）
-    - cron: '0 */12 * * *'
+    # 每天的 UTC 时间 00:00 运行一次（每 24 小时）
+    - cron: '0 0 * * *'
   # 支持在 GitHub 页面上点击手动运行测试
   workflow_dispatch:
 
