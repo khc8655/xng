@@ -504,6 +504,10 @@ async def crawl_page(url: str, query: str = None) -> str:
     global crawl_count
     crawl_count += 1
     
+    # Security check: Prevent SSRF/LFI by forcing http/https schemas
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return "Error: URL must start with http:// or https://"
+        
     # Cache lookup
     markdown_text = crawl_cache.get(url)
     
@@ -695,7 +699,8 @@ class TokenAuthMiddleware:
                 await self.send_error(send, 401, "Missing Authorization Token")
                 return
 
-            if token != BEARER_TOKEN:
+            import secrets
+            if not secrets.compare_digest(token, BEARER_TOKEN):
                 masked_token = token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
                 logger.warning(f"Auth failed (Invalid Token '{masked_token}'): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
