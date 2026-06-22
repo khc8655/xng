@@ -632,6 +632,7 @@ class SimpleAuthMiddleware:
 
             import secrets
             if not secrets.compare_digest(token, BEARER_TOKEN):
+                logger.warning(f"Auth failed (Invalid Token - length {len(token)} vs expected {len(BEARER_TOKEN)}): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
 
