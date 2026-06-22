@@ -1064,7 +1064,7 @@ async def dashboard(request: Request):
         </main>
 
         <footer>
-            <p>Model Context Protocol Server | 运行于 Hugging Face Spaces | Powered by <a href="https://github.com/khc8655/xng" target="_blank">khc8655/xng</a></p>
+            <p>Model Context Protocol Server | 运行于 Hugging Face Spaces</p>
         </footer>
 
         <script>
