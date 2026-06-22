@@ -657,34 +657,17 @@ class TokenAuthMiddleware:
 
         scope["path"] = path
 
-        # Intercept and route /mcp/sse endpoints inside the middleware
-        if path in ["/mcp/sse", "/mcp/sse/"]:
-            if method == "POST":
-                # Route POST requests on SSE endpoint (Streamable HTTP) to the handler
-                scope["path"] = "/mcp"
-                await streamable_http_asgi_app(scope, receive, logging_send)
-                return
-            elif method == "GET":
-                headers = dict(scope.get("headers", []))
-                session_id = headers.get(b"mcp-session-id")
-                if session_id:
-                    # Route GET request with mcp-session-id to Streamable HTTP handler
-                    scope["path"] = "/mcp"
-                    await streamable_http_asgi_app(scope, receive, logging_send)
-                    return
-                # Otherwise, let it fall through to the native SSE mount handler normally
-
-        from urllib.parse import parse_qs
+        # Determine authentication requirement
+        headers = dict(scope.get("headers", []))
+        session_id_header = headers.get(b"mcp-session-id")
         
-        # Exclude paths from authentication check
-        if path in ["/", "/health", "/api/stats"] or path.startswith("/mcp/messages"):
-            await self.app(scope, receive, logging_send)
-            return
-
-        if BEARER_TOKEN:
-            headers = dict(scope.get("headers", []))
+        # Check if the request is public or already holds a secure session identifier
+        is_public = path in ["/", "/health", "/api/stats"]
+        has_secure_session = (session_id_header is not None) or path.startswith("/mcp/messages")
+        
+        if not is_public and not has_secure_session and BEARER_TOKEN:
+            from urllib.parse import parse_qs
             query_string = scope.get("query_string", b"").decode("utf-8")
-            
             token = None
             
             # 1. Check Authorization header (HTTP headers in ASGI scope are lowercase bytes)
@@ -715,6 +698,20 @@ class TokenAuthMiddleware:
                 logger.warning(f"Auth failed (Invalid Token '{masked_token}'): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
+
+        # Route the request based on transport type
+        is_streamable_http = False
+        if path in ["/mcp", "/mcp/"]:
+            if method == "POST" or (method == "GET" and session_id_header is not None):
+                is_streamable_http = True
+        elif path in ["/mcp/sse", "/mcp/sse/"]:
+            if method == "POST" or (method == "GET" and session_id_header is not None):
+                is_streamable_http = True
+
+        if is_streamable_http:
+            scope["path"] = "/mcp"
+            await streamable_http_asgi_app(scope, receive, logging_send)
+            return
 
         await self.app(scope, receive, logging_send)
 
