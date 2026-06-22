@@ -322,13 +322,27 @@ async def test_searxng():
     results_status = {}
     headers = {
         "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "application/json"
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
     }
     async with httpx.AsyncClient(timeout=8.0) as client:
+        # Test DuckDuckGo
+        try:
+            ddg_headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
+            }
+            res = await client.get("https://html.duckduckgo.com/html/", params={"q": "apple"}, headers=ddg_headers)
+            if res.status_code == 200:
+                results_status["duckduckgo"] = "SUCCESS"
+            else:
+                results_status["duckduckgo"] = f"HTTP_{res.status_code}"
+        except Exception as e:
+            results_status["duckduckgo"] = f"ERROR: {type(e).__name__} - {str(e)}"
+
+        # Test SearXNG instances
         for url in candidates:
             url = url.rstrip("/")
             try:
-                res = await client.get(f"{url}/search", params={"q": "apple", "format": "json"}, headers=headers)
+                res = await client.get(f"{url}/search", params={"q": "apple", "format": "json"}, headers={"User-Agent": headers["User-Agent"], "Accept": "application/json"})
                 if res.status_code == 200:
                     try:
                         data = res.json()
