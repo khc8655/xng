@@ -583,15 +583,8 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Ensure the MCP session manager starts/stops with the app
-    async with mcp.session_manager.run():
-        logger.info("Search & Crawl MCP Server started.")
-        yield
-
 # Create FastAPI app
-app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
+app = FastAPI(title="Multi-Engine Search & Crawl MCP Server")
 
 class SimpleAuthMiddleware:
     """
