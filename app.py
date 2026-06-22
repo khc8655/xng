@@ -25,6 +25,28 @@ search_count = 0
 crawl_count = 0
 start_time = time.time()
 
+# 0. Lightweight TTL Cache class
+class TTLCache:
+    def __init__(self, ttl_seconds: int = 600):
+        self.ttl = ttl_seconds
+        self.cache = {}
+        
+    def get(self, key):
+        if key in self.cache:
+            val, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                return val
+            else:
+                del self.cache[key]
+        return None
+        
+    def set(self, key, val):
+        self.cache[key] = (val, time.time())
+
+search_cache = TTLCache(ttl_seconds=600)
+crawl_cache = TTLCache(ttl_seconds=600)
+crawler = None
+
 # 1. Initialize FastMCP with DNS rebinding protection disabled for cloud/proxy deployments
 mcp = FastMCP(
     "Search & Crawl Server",
@@ -97,7 +119,7 @@ async def search_duckduckgo(query: str) -> str:
     except Exception as e:
         return f"Error executing DuckDuckGo search: {str(e)}"
 
-# 3. Define SearXNG search tool with DuckDuckGo fallback
+# 3. Define SearXNG search tool with DuckDuckGo fallback and caching
 @mcp.tool()
 async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     """
@@ -115,6 +137,13 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     global search_count
     search_count += 1
     
+    # Cache lookup
+    cache_key = f"{query}:{engines}:{page}"
+    cached = search_cache.get(cache_key)
+    if cached:
+        logger.info(f"Cache HIT for search query: {query}")
+        return cached
+        
     url = SEARXNG_URL.rstrip("/") + "/search"
     params = {
         "q": query,
@@ -130,13 +159,17 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
             response = await client.get(url, params=params)
             if response.status_code != 200:
                 logger.warning(f"SearXNG returned status code {response.status_code}. Falling back to DuckDuckGo HTML search.")
-                return await search_duckduckgo(query)
+                result_str = await search_duckduckgo(query)
+                search_cache.set(cache_key, result_str)
+                return result_str
             
             data = response.json()
             results = data.get("results", [])
             if not results:
                 logger.warning("SearXNG returned no results. Falling back to DuckDuckGo HTML search.")
-                return await search_duckduckgo(query)
+                result_str = await search_duckduckgo(query)
+                search_cache.set(cache_key, result_str)
+                return result_str
 
             formatted_results = []
             for idx, r in enumerate(results[:10]):
@@ -149,10 +182,14 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
                     f"   *Source*: {engine}\n"
                     f"   *Snippet*: {snippet}\n"
                 )
-            return "\n".join(formatted_results)
+            result_str = "\n".join(formatted_results)
+            search_cache.set(cache_key, result_str)
+            return result_str
     except Exception as e:
         logger.warning(f"Error executing search query via SearXNG: {str(e)}. Falling back to DuckDuckGo HTML search.")
-        return await search_duckduckgo(query)
+        result_str = await search_duckduckgo(query)
+        search_cache.set(cache_key, result_str)
+        return result_str
 
 # 3. Define Crawl tool with Crawl4AI + Fallback
 async def fallback_crawl(url: str) -> str:
@@ -188,21 +225,36 @@ async def crawl_page(url: str) -> str:
     global crawl_count
     crawl_count += 1
     
-    try:
-        logger.info(f"Crawling with Crawl4AI: {url}")
-        browser_conf = BrowserConfig(
-            headless=True,
-            extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
-        )
-        run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    # Cache lookup
+    cached = crawl_cache.get(url)
+    if cached:
+        logger.info(f"Cache HIT for crawl URL: {url}")
+        return cached
         
-        async with AsyncWebCrawler(config=browser_conf) as crawler:
+    run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    
+    try:
+        if crawler is None:
+            logger.warning(f"Global Crawl4AI crawler is not initialized. Using temporary crawler context: {url}")
+            browser_conf = BrowserConfig(
+                headless=True,
+                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+            )
+            async with AsyncWebCrawler(config=browser_conf) as temp_crawler:
+                result = await temp_crawler.arun(url=url, config=run_conf)
+        else:
+            logger.info(f"Crawling with persistent global Crawl4AI browser session: {url}")
             result = await crawler.arun(url=url, config=run_conf)
-            if result.success and result.markdown:
-                return result.markdown
-            else:
-                err_msg = result.error_message or "Unknown failure"
-                logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
+            
+        if result.success and result.markdown:
+            markdown_text = result.markdown
+            # Normalize excessive empty lines
+            markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+            crawl_cache.set(url, markdown_text)
+            return markdown_text
+        else:
+            err_msg = result.error_message or "Unknown failure"
+            logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
     except Exception as e:
         logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
 
@@ -210,7 +262,9 @@ async def crawl_page(url: str) -> str:
     try:
         logger.info(f"Executing fallback crawler: {url}")
         text = await fallback_crawl(url)
-        return f"*(Fallback Parser Output)*\n\n{text}"
+        formatted_text = f"*(Fallback Parser Output)*\n\n{text}"
+        crawl_cache.set(url, formatted_text)
+        return formatted_text
     except Exception as e:
         return f"Error crawling page '{url}': {str(e)}"
 
@@ -232,9 +286,29 @@ def get_uptime() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global crawler
     # Ensure the MCP session manager starts/stops with the app (required for Streamable HTTP transport)
     async with mcp.session_manager.run():
-        yield
+        logger.info("Initializing global Crawl4AI AsyncWebCrawler...")
+        try:
+            browser_conf = BrowserConfig(
+                headless=True,
+                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+            )
+            crawler = AsyncWebCrawler(config=browser_conf)
+            await crawler.start()
+            logger.info("Global Crawl4AI AsyncWebCrawler started successfully.")
+        except Exception as e:
+            logger.error(f"Failed to start global Crawl4AI AsyncWebCrawler: {e}")
+            crawler = None
+            
+        try:
+            yield
+        finally:
+            if crawler is not None:
+                logger.info("Closing global Crawl4AI AsyncWebCrawler...")
+                await crawler.close()
+                logger.info("Global Crawl4AI AsyncWebCrawler closed.")
 
 # Create FastAPI app
 app = FastAPI(title="SearXNG Crawl MCP Server", lifespan=lifespan)
