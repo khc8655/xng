@@ -4,7 +4,7 @@ import re
 import time
 import subprocess
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, Response, HTMLResponse
 import httpx
 from bs4 import BeautifulSoup
@@ -12,7 +12,6 @@ from markdownify import markdownify as md
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
@@ -29,24 +28,6 @@ def get_active_engines() -> str:
         engines.append("Google")
     engines.append("DuckDuckGo (Free)")
     return ", ".join(engines)
-
-# Chromium extra args for anti-abuse domain blocking (to prevent Hugging Face from flagging the space)
-BLOCKED_HOST_RULES = (
-    "MAP *.google-analytics.com 127.0.0.1, "
-    "MAP *.doubleclick.net 127.0.0.1, "
-    "MAP *.mmstat.com 127.0.0.1, "
-    "MAP *.alicdn.com 127.0.0.1, "
-    "MAP *.cloudflareinsights.com 127.0.0.1, "
-    "MAP challenges.cloudflare.com 127.0.0.1, "
-    "MAP cloudflare-ech.com 127.0.0.1, "
-    "MAP log.mmstat.com 127.0.0.1, "
-    "MAP xux-web-config.oss-accelerate.aliyuncs.com 127.0.0.1, "
-    "MAP googleads.g.doubleclick.net 127.0.0.1, "
-    "MAP *.googleadservices.com 127.0.0.1, "
-    "MAP *.googletagmanager.com 127.0.0.1, "
-    "MAP *.googletagservices.com 127.0.0.1, "
-    "MAP *.analytics.google.com 127.0.0.1"
-)
 
 # Global counters and startup time
 search_count = 0
@@ -73,7 +54,6 @@ class TTLCache:
 
 search_cache = TTLCache(ttl_seconds=600)
 crawl_cache = TTLCache(ttl_seconds=600)
-crawler = None
 
 # 1. Initialize FastMCP with DNS rebinding protection disabled for cloud/proxy deployments
 mcp = FastMCP(
@@ -231,18 +211,23 @@ async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
 
 # 3. Define Unified search tool with failover and caching
 @mcp.tool()
-async def search_web(query: str, engines: str = None, page: int = 1) -> str:
+async def search_web(query: str, engines: str | None = None, page: int = 1) -> str:
     """
-    Search the web to find web pages, answers, news, documents, or articles relevant to the query.
-    Use this tool as the first step to search the web for any questions or topics that require real-time information or web results.
+    Perform a broad web search to find real-time information, news, answers, or references.
+    
+    CRITICAL AGENT INSTRUCTIONS:
+    - ALWAYS use this tool FIRST when asked about current events, facts, documentation, or unknown topics.
+    - If the user provides a specific URL to read, do NOT use this tool. Use `crawl_page` instead.
+    - If your search returns a list of URLs but you need the deep content of a specific result, pass that URL to `crawl_page`.
+    - Do NOT hallucinate search results. Only return information present in the snippet.
 
     Args:
-        query: The search query string. Keep it concise but descriptive.
-        engines: Optional comma-separated list of engines to query (e.g. google, bing, duckduckgo, wikipedia, github, arxiv, reddit). Recommended to leave empty to search all default engines.
-        page: Page number for search results (starts at 1). Useful for pagination/fetching more results.
+        query: The specific search query. Keep it concise, keyword-focused, and descriptive (e.g., "Python 3.11 release notes").
+        engines: Optional. Comma-separated list of engines (e.g., "Tavily, Exa, Google"). Leave as null/None to use all available defaults.
+        page: Optional. The page number for pagination. Defaults to 1. Increment if you need more results for the same query.
         
     Returns:
-        A markdown formatted list of top search results (up to 10), each containing the index, title (linked to the page), source engine, and a brief content snippet.
+        A Markdown-formatted list of up to 10 search results containing titles, snippets, and source URLs.
     """
     global search_count
     search_count += 1
@@ -514,73 +499,48 @@ def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
     return ranked[:3]
 
 @mcp.tool()
-async def crawl_page(url: str, query: str = None) -> str:
+async def crawl_page(url: str, query: str | None = None) -> str:
     """
-    Crawls a specific web page by its URL and extracts its main textual content, converting it into clean, readable Markdown format.
-    Use this tool when you have a specific URL (e.g., from search results) and need to read the full body content, documentation, blog post, or article. Do NOT use this tool for search queries (use `search_web` instead).
+    Crawl a specific webpage by its URL to extract and read its full textual content in Markdown format.
+    
+    CRITICAL AGENT INSTRUCTIONS:
+    - ALWAYS use this tool when you need to read the content of a specific URL (e.g. from search results, or provided by the user).
+    - Do NOT use this tool for general search queries. (Use `search_web` instead).
+    - If the page is too long and you only care about a specific topic, provide the `query` parameter. This will use semantic RAG to extract only the top 3 most relevant paragraphs, saving your token context.
+    - If you need the entire page content, leave `query` as null/None.
 
     Args:
-        url: The absolute HTTP/HTTPS URL of the web page to crawl. Must start with http:// or https://.
-        query: Optional search query to perform semantic RAG chunking and extract only the top 3 most relevant segments of the webpage, preventing token bloat.
+        url: The absolute HTTP/HTTPS URL of the web page to crawl.
+        query: Optional. A specific question or topic to extract from the page. If provided, returns only the most relevant snippets. If null, returns the full page content.
         
     Returns:
-        The full readable content of the webpage represented as clean Markdown (if no query is provided), or the top 3 semantically relevant paragraphs/chunks (if a query is provided).
+        Clean Markdown content of the webpage, or extracted semantic snippets if a query was provided.
     """
     global crawl_count
     crawl_count += 1
     
-    # Security check: Prevent SSRF/LFI by forcing http/https schemas
     if not (url.startswith("http://") or url.startswith("https://")):
         return "Error: URL must start with http:// or https://"
         
-    # Cache lookup
     markdown_text = crawl_cache.get(url)
     
     if not markdown_text:
-        run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-        try:
-            if crawler is None:
-                logger.warning(f"Global Crawl4AI crawler is not initialized. Using temporary crawler context: {url}")
-                browser_conf = BrowserConfig(
-                    headless=True,
-                    extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process", f"--host-rules={BLOCKED_HOST_RULES}"]
-                )
-                async with AsyncWebCrawler(config=browser_conf) as temp_crawler:
-                    result = await temp_crawler.arun(url=url, config=run_conf)
-            else:
-                logger.info(f"Crawling with persistent global Crawl4AI browser session: {url}")
-                result = await crawler.arun(url=url, config=run_conf)
-                
-            if result.success and result.markdown:
-                markdown_text = result.markdown
-                # Normalize excessive empty lines
-                markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+        # 1. Try Scrapfly (Primary Engine)
+        SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
+        if SCRAPFLY_API_KEY:
+            try:
+                logger.info(f"Attempting Scrapfly crawl for: {url}")
+                text = await crawl_scrapfly(url, SCRAPFLY_API_KEY)
+                markdown_text = f"*(Scrapfly Crawler Output)*\n\n{text}"
                 crawl_cache.set(url, markdown_text)
-            else:
-                err_msg = result.error_message or "Unknown failure"
-                logger.warning(f"Crawl4AI failed: {err_msg}. Trying Scrapfly/Fallback...")
+            except Exception as e:
+                logger.warning(f"Scrapfly failed: {str(e)}. Falling back to basic HTTP...")
                 markdown_text = None
-        except Exception as e:
-            logger.warning(f"Crawl4AI exception: {str(e)}. Trying Scrapfly/Fallback...")
-            markdown_text = None
 
-        # 2. Try Scrapfly if Crawl4AI fails and SCRAPFLY_API_KEY is present
-        if not markdown_text:
-            SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
-            if SCRAPFLY_API_KEY:
-                try:
-                    logger.info(f"Attempting Scrapfly fallback for: {url}")
-                    text = await crawl_scrapfly(url, SCRAPFLY_API_KEY)
-                    markdown_text = f"*(Scrapfly Crawler Output)*\n\n{text}"
-                    crawl_cache.set(url, markdown_text)
-                except Exception as e:
-                    logger.warning(f"Scrapfly fallback failed: {str(e)}")
-                    markdown_text = None
-
-        # 3. Try standard HTTP client fallback
+        # 2. Try standard HTTP client fallback
         if not markdown_text:
             try:
-                logger.info(f"Executing fallback crawler: {url}")
+                logger.info(f"Executing fallback basic HTTP crawler: {url}")
                 text = await fallback_crawl(url)
                 markdown_text = f"*(Fallback Parser Output)*\n\n{text}"
                 crawl_cache.set(url, markdown_text)
@@ -625,34 +585,19 @@ def get_uptime() -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global crawler
-    # Ensure the MCP session manager starts/stops with the app (required for Streamable HTTP transport)
+    # Ensure the MCP session manager starts/stops with the app
     async with mcp.session_manager.run():
-        logger.info("Initializing global Crawl4AI AsyncWebCrawler...")
-        try:
-            browser_conf = BrowserConfig(
-                headless=True,
-                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process", f"--host-rules={BLOCKED_HOST_RULES}"]
-            )
-            crawler = AsyncWebCrawler(config=browser_conf)
-            await crawler.start()
-            logger.info("Global Crawl4AI AsyncWebCrawler started successfully.")
-        except Exception as e:
-            logger.error(f"Failed to start global Crawl4AI AsyncWebCrawler: {e}")
-            crawler = None
-            
-        try:
-            yield
-        finally:
-            if crawler is not None:
-                logger.info("Closing global Crawl4AI AsyncWebCrawler...")
-                await crawler.close()
-                logger.info("Global Crawl4AI AsyncWebCrawler closed.")
+        logger.info("Search & Crawl MCP Server started.")
+        yield
 
 # Create FastAPI app
 app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
 
-class TokenAuthMiddleware:
+class SimpleAuthMiddleware:
+    """
+    A cleaner ASGI middleware that ONLY handles Bearer token authentication
+    for the /mcp routes, without breaking ASGI path routing or FastMCP apps.
+    """
     def __init__(self, app):
         self.app = app
 
@@ -664,41 +609,14 @@ class TokenAuthMiddleware:
         path = scope.get("path", "")
         method = scope.get("method", "")
 
-        async def logging_send(message):
-            if message["type"] == "http.response.start":
-                status_code = message.get("status", 200)
-                if status_code >= 400:
-                    req_headers = dict(scope.get("headers", []))
-                    session_id = req_headers.get(b"mcp-session-id", b"").decode("utf-8") if b"mcp-session-id" in req_headers else ""
-                    logger.warning(f"HTTP Response Error: {method} {path} -> Status {status_code} | Session ID: {session_id}")
-            await send(message)
-
-        # Rewrite paths for backwards compatibility with old client configurations
-        if path == "/sse":
-            path = "/mcp/sse"
-        elif path == "/sse/":
-            path = "/mcp/sse/"
-        elif path == "/messages":
-            path = "/mcp/messages"
-        elif path.startswith("/messages/"):
-            path = "/mcp" + path
-
-        scope["path"] = path
-
-        # Determine authentication requirement
-        headers = dict(scope.get("headers", []))
-        session_id_header = headers.get(b"mcp-session-id")
-        
-        # Check if the request is public or already holds a secure session identifier
-        is_public = path in ["/", "/health", "/api/stats"]
-        has_secure_session = (session_id_header is not None) or path.startswith("/mcp/messages")
-        
-        if not is_public and not has_secure_session and BEARER_TOKEN:
+        # Only protect /mcp routes
+        if path.startswith("/mcp") and BEARER_TOKEN:
             from urllib.parse import parse_qs
+            headers = dict(scope.get("headers", []))
             query_string = scope.get("query_string", b"").decode("utf-8")
             token = None
             
-            # 1. Check Authorization header (HTTP headers in ASGI scope are lowercase bytes)
+            # Check Authorization header
             auth_header_bytes = headers.get(b"authorization", b"")
             if auth_header_bytes:
                 auth_header = auth_header_bytes.decode("utf-8")
@@ -708,37 +626,24 @@ class TokenAuthMiddleware:
                 else:
                     token = auth_header
             
-            # 2. Check token query parameter
+            # Check query param
             if not token and query_string:
                 params = parse_qs(query_string)
-                token_list = params.get("token")
-                if token_list:
-                    token = token_list[0]
+                if "token" in params:
+                    token = params["token"][0]
 
             if not token:
-                logger.warning(f"Auth failed (Missing Token): {method} {path} | Query keys: {list(parse_qs(query_string).keys()) if query_string else []}")
+                logger.warning(f"Auth failed (Missing Token): {method} {path}")
                 await self.send_error(send, 401, "Missing Authorization Token")
                 return
 
             import secrets
             if not secrets.compare_digest(token, BEARER_TOKEN):
-                masked_token = token[:4] + "..." + token[-4:] if len(token) > 8 else "***"
-                logger.warning(f"Auth failed (Invalid Token '{masked_token}'): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
 
-        # Route the request based on transport type
-        is_streamable_http = False
-        if path in ["/mcp", "/mcp/", "/mcp/sse", "/mcp/sse/"]:
-            if method in ["POST", "DELETE"] or (method == "GET" and session_id_header is not None):
-                is_streamable_http = True
-
-        if is_streamable_http:
-            scope["path"] = "/mcp"
-            await streamable_http_asgi_app(scope, receive, logging_send)
-            return
-
-        await self.app(scope, receive, logging_send)
+        # Pass through to the underlying FastAPI app and FastMCP mounts
+        await self.app(scope, receive, send)
 
     async def send_error(self, send, status_code, message):
         import json
@@ -756,16 +661,14 @@ class TokenAuthMiddleware:
             "body": response_body,
         })
 
-app.add_middleware(TokenAuthMiddleware)
-
-# Initialize Streamable HTTP application
-streamable_http_asgi_app = mcp.streamable_http_app()
-
-# Initialize native FastMCP SSE app instance once to maintain session states
-sse_asgi_app = mcp.sse_app()
+app.add_middleware(SimpleAuthMiddleware)
 
 # Mount native FastMCP SSE app
-app.mount("/mcp", sse_asgi_app)
+# The SSE endpoint will be available at GET /mcp/sse (since FastMCP sse_app maps /sse internally)
+# Wait, FastMCP's sse_app() internally creates Starlette routes: GET / and POST /messages
+# By mounting at /mcp, clients should connect to GET /mcp/ and POST /mcp/messages
+# For compatibility with clients expecting /mcp/sse, FastMCP in its newer versions maps GET /sse
+app.mount("/mcp", mcp.sse_app())
 
 @app.get("/health")
 async def health_check():
