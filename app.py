@@ -174,31 +174,7 @@ async def search_exa(query: str, api_key: str) -> list[dict]:
         else:
             raise Exception(f"Exa returned status code {r.status_code}")
 
-async def search_bing(query: str, api_key: str) -> list[dict]:
-    url = "https://api.bing.microsoft.com/v7.0/search"
-    headers = {
-        "Ocp-Apim-Subscription-Key": api_key
-    }
-    params = {
-        "q": query,
-        "count": 10
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(url, params=params, headers=headers)
-        if r.status_code == 200:
-            data = r.json()
-            pages = data.get("webPages", {}).get("value", [])
-            return [
-                {
-                    "title": item.get("name", "No Title"),
-                    "url": item.get("url", "#"),
-                    "snippet": item.get("snippet", "No description."),
-                    "engine": "Bing"
-                }
-                for item in pages
-            ]
-        else:
-            raise Exception(f"Bing returned status code {r.status_code}")
+
 
 async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
     url = "https://customsearch.googleapis.com/customsearch/v1"
@@ -255,7 +231,6 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     EXA_API_KEY = os.getenv("EXA_API_KEY")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     GOOGLE_CX = os.getenv("GOOGLE_CX")
-    BING_API_KEY = os.getenv("BING_API_KEY")
 
     results = None
     engine_used = None
@@ -287,16 +262,7 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
         except Exception as e:
             logger.warning(f"Google Custom Search failed: {e}. Falling back...")
 
-    # 4. Try Bing
-    if not results and BING_API_KEY:
-        try:
-            logger.info("Attempting search via Bing...")
-            results = await search_bing(query, BING_API_KEY)
-            engine_used = "Bing"
-        except Exception as e:
-            logger.warning(f"Bing search failed: {e}. Falling back...")
-
-    # 5. Fallback to DuckDuckGo HTML Scraper
+    # 4. Fallback to DuckDuckGo HTML Scraper
     if not results:
         logger.warning("No search API keys configured or all failed. Falling back to DuckDuckGo HTML search.")
         result_str = await search_duckduckgo(query)
@@ -337,6 +303,37 @@ async def fallback_crawl(url: str) -> str:
         markdown_text = md(str(body), heading_style="ATX").strip()
         markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
         return markdown_text
+
+async def crawl_scrapfly(url: str, api_key: str) -> str:
+    """
+    Crawls a web page using Scrapfly Scrape API with Javascript rendering,
+    antibot bypass, and automatic Markdown formatting.
+    """
+    scrapfly_url = "https://api.scrapfly.io/scrape"
+    params = {
+        "key": api_key,
+        "url": url,
+        "format": "markdown",
+        "only_content": "true"
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        logger.info(f"Attempting crawl via Scrapfly API for: {url}")
+        r = await client.get(scrapfly_url, params=params)
+        if r.status_code == 200:
+            data = r.json()
+            result = data.get("result", {})
+            content = result.get("content", "")
+            if content:
+                return content
+            else:
+                raise Exception("Scrapfly returned empty content")
+        else:
+            err_msg = f"HTTP {r.status_code}"
+            try:
+                err_msg = r.json().get("detail", err_msg)
+            except:
+                pass
+            raise Exception(f"Scrapfly API failed: {err_msg}")
 
 def chunk_markdown(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
     """
@@ -533,14 +530,27 @@ async def crawl_page(url: str, query: str = None) -> str:
                 crawl_cache.set(url, markdown_text)
             else:
                 err_msg = result.error_message or "Unknown failure"
-                logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
+                logger.warning(f"Crawl4AI failed: {err_msg}. Trying Scrapfly/Fallback...")
                 markdown_text = None
         except Exception as e:
-            logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
+            logger.warning(f"Crawl4AI exception: {str(e)}. Trying Scrapfly/Fallback...")
             markdown_text = None
 
+        # 2. Try Scrapfly if Crawl4AI fails and SCRAPFLY_API_KEY is present
         if not markdown_text:
-            # Fallback execution
+            SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
+            if SCRAPFLY_API_KEY:
+                try:
+                    logger.info(f"Attempting Scrapfly fallback for: {url}")
+                    text = await crawl_scrapfly(url, SCRAPFLY_API_KEY)
+                    markdown_text = f"*(Scrapfly Crawler Output)*\n\n{text}"
+                    crawl_cache.set(url, markdown_text)
+                except Exception as e:
+                    logger.warning(f"Scrapfly fallback failed: {str(e)}")
+                    markdown_text = None
+
+        # 3. Try standard HTTP client fallback
+        if not markdown_text:
             try:
                 logger.info(f"Executing fallback crawler: {url}")
                 text = await fallback_crawl(url)
