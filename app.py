@@ -33,11 +33,75 @@ mcp = FastMCP(
     )
 )
 
-# 2. Define SearXNG search tool
+# 2. Define DuckDuckGo search fallback helper
+async def search_duckduckgo(query: str) -> str:
+    import urllib.parse
+    url = "https://html.duckduckgo.com/html/"
+    params = {"q": query}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            res = await client.post(url, data=params, headers=headers)
+            if res.status_code != 200:
+                return f"Error: DuckDuckGo returned status code {res.status_code}."
+                
+            soup = BeautifulSoup(res.text, "html.parser")
+            results = soup.select(".result")
+            if not results:
+                return "No search results found for the query."
+                
+            formatted_results = []
+            organic_idx = 1
+            for result in results:
+                # Skip ad result cards
+                classes = result.get("class", [])
+                if "result--ad" in classes:
+                    continue
+                    
+                title_el = result.select_one(".result__title")
+                a_el = result.select_one(".result__a")
+                snippet_el = result.select_one(".result__snippet")
+                
+                if title_el and a_el:
+                    title = title_el.text.strip()
+                    raw_link = a_el["href"]
+                    snippet = snippet_el.text.strip() if snippet_el else "No description."
+                    
+                    # Filter out ad redirect URLs
+                    if "y.js?" in raw_link or "ad_provider" in raw_link:
+                        continue
+                        
+                    parsed_link = urllib.parse.urlparse(raw_link)
+                    query_params = urllib.parse.parse_qs(parsed_link.query)
+                    link = raw_link
+                    if "uddg" in query_params:
+                        link = query_params["uddg"][0]
+                    elif raw_link.startswith("//"):
+                        link = "https:" + raw_link
+                        
+                    formatted_results.append(
+                        f"{organic_idx}. **[{title}]({link})**\n"
+                        f"   *Source*: DuckDuckGo (Fallback)\n"
+                        f"   *Snippet*: {snippet}\n"
+                    )
+                    organic_idx += 1
+                    if organic_idx > 10:
+                        break
+                        
+            if not formatted_results:
+                return "No organic search results found."
+            return "\n".join(formatted_results)
+    except Exception as e:
+        return f"Error executing DuckDuckGo search: {str(e)}"
+
+# 3. Define SearXNG search tool with DuckDuckGo fallback
 @mcp.tool()
 async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     """
-    Search the web using SearXNG to find web pages, answers, news, documents, or articles relevant to the query.
+    Search the web to find web pages, answers, news, documents, or articles relevant to the query.
     Use this tool as the first step to search the web for any questions or topics that require real-time information or web results.
 
     Args:
@@ -61,15 +125,18 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
         params["engines"] = engines
 
     try:
+        logger.info(f"Querying SearXNG: {url} with query: {query}")
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.get(url, params=params)
             if response.status_code != 200:
-                return f"Error: SearXNG returned status code {response.status_code}. Response: {response.text[:200]}"
+                logger.warning(f"SearXNG returned status code {response.status_code}. Falling back to DuckDuckGo HTML search.")
+                return await search_duckduckgo(query)
             
             data = response.json()
             results = data.get("results", [])
             if not results:
-                return "No search results found for the query."
+                logger.warning("SearXNG returned no results. Falling back to DuckDuckGo HTML search.")
+                return await search_duckduckgo(query)
 
             formatted_results = []
             for idx, r in enumerate(results[:10]):
@@ -84,7 +151,8 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
                 )
             return "\n".join(formatted_results)
     except Exception as e:
-        return f"Error executing search query: {str(e)}"
+        logger.warning(f"Error executing search query via SearXNG: {str(e)}. Falling back to DuckDuckGo HTML search.")
+        return await search_duckduckgo(query)
 
 # 3. Define Crawl tool with Crawl4AI + Fallback
 async def fallback_crawl(url: str) -> str:
@@ -294,70 +362,6 @@ app.mount("/mcp", sse_asgi_app)
 @app.get("/health")
 async def health_check():
     return {"status": "ok", "searxng_url": SEARXNG_URL, "auth_enabled": BEARER_TOKEN is not None}
-
-@app.get("/api/test_searxng")
-async def test_searxng():
-    candidates = [
-        "https://searx.tiekoetter.com/",
-        "https://search.bladerunn.in/",
-        "https://searx.oloke.xyz/",
-        "https://search.mectov.my.id/",
-        "https://search.sapti.me/",
-        "https://searx.ro/",
-        "https://copp.gg/",
-        "https://searx.namejeff.xyz/",
-        "https://search.femboy.ad/",
-        "https://etsi.me/",
-        "https://searx.ononoki.org/",
-        "https://search.2b9t.xyz/",
-        "https://search.rhscz.eu/",
-        "https://searx.rhscz.eu/",
-        "https://searxng.website/",
-        "https://search.privacyredirect.com/",
-        "https://searxng.fishfvch.com/",
-        "https://failsearx.culturanerd.it/",
-        "https://search.ctq.ro/",
-        "https://priv.au/"
-    ]
-    results_status = {}
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
-    }
-    async with httpx.AsyncClient(timeout=8.0) as client:
-        # Test DuckDuckGo
-        try:
-            ddg_headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
-            }
-            res = await client.get("https://html.duckduckgo.com/html/", params={"q": "apple"}, headers=ddg_headers)
-            if res.status_code == 200:
-                results_status["duckduckgo"] = "SUCCESS"
-            else:
-                results_status["duckduckgo"] = f"HTTP_{res.status_code}"
-        except Exception as e:
-            results_status["duckduckgo"] = f"ERROR: {type(e).__name__} - {str(e)}"
-
-        # Test SearXNG instances
-        for url in candidates:
-            url = url.rstrip("/")
-            try:
-                res = await client.get(f"{url}/search", params={"q": "apple", "format": "json"}, headers={"User-Agent": headers["User-Agent"], "Accept": "application/json"})
-                if res.status_code == 200:
-                    try:
-                        data = res.json()
-                        results = data.get("results", [])
-                        if results:
-                            results_status[url] = f"SUCCESS (count: {len(results)})"
-                        else:
-                            results_status[url] = "EMPTY_RESULTS"
-                    except Exception as e:
-                        results_status[url] = f"INVALID_JSON: {str(e)}"
-                else:
-                    results_status[url] = f"HTTP_{res.status_code}"
-            except Exception as e:
-                results_status[url] = f"ERROR: {type(e).__name__} - {str(e)}"
-    return results_status
 
 # API Endpoint to fetch current stats
 @app.get("/api/stats")
