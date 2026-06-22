@@ -119,7 +119,113 @@ async def search_duckduckgo(query: str) -> str:
     except Exception as e:
         return f"Error executing DuckDuckGo search: {str(e)}"
 
-# 3. Define SearXNG search tool with DuckDuckGo fallback and caching
+# Helper functions for the Search Aggregator Gateway
+async def search_tavily(query: str, api_key: str) -> list[dict]:
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": 10
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(url, json=payload)
+        if r.status_code == 200:
+            data = r.json()
+            return [
+                {
+                    "title": item.get("title", "No Title"),
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("content", "No description."),
+                    "engine": "Tavily"
+                }
+                for item in data.get("results", [])
+            ]
+        else:
+            raise Exception(f"Tavily returned status code {r.status_code}")
+
+async def search_exa(query: str, api_key: str) -> list[dict]:
+    url = "https://api.exa.ai/search"
+    headers = {
+        "x-api-key": api_key,
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "query": query,
+        "numResults": 10,
+        "contents": {
+            "text": {
+                "maxCharacters": 400
+            }
+        }
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        if r.status_code == 200:
+            data = r.json()
+            return [
+                {
+                    "title": item.get("title") or "No Title",
+                    "url": item.get("url", "#"),
+                    "snippet": (item.get("text", "")[:350] + "...") if item.get("text") else "No description.",
+                    "engine": "Exa"
+                }
+                for item in data.get("results", [])
+            ]
+        else:
+            raise Exception(f"Exa returned status code {r.status_code}")
+
+async def search_bing(query: str, api_key: str) -> list[dict]:
+    url = "https://api.bing.microsoft.com/v7.0/search"
+    headers = {
+        "Ocp-Apim-Subscription-Key": api_key
+    }
+    params = {
+        "q": query,
+        "count": 10
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url, params=params, headers=headers)
+        if r.status_code == 200:
+            data = r.json()
+            pages = data.get("webPages", {}).get("value", [])
+            return [
+                {
+                    "title": item.get("name", "No Title"),
+                    "url": item.get("url", "#"),
+                    "snippet": item.get("snippet", "No description."),
+                    "engine": "Bing"
+                }
+                for item in pages
+            ]
+        else:
+            raise Exception(f"Bing returned status code {r.status_code}")
+
+async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
+    url = "https://customsearch.googleapis.com/customsearch/v1"
+    params = {
+        "q": query,
+        "key": api_key,
+        "cx": cx,
+        "num": 10
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(url, params=params)
+        if r.status_code == 200:
+            data = r.json()
+            items = data.get("items", [])
+            return [
+                {
+                    "title": item.get("title", "No Title"),
+                    "url": item.get("link", "#"),
+                    "snippet": item.get("snippet", "No description."),
+                    "engine": "Google"
+                }
+                for item in items
+            ]
+        else:
+            raise Exception(f"Google returned status code {r.status_code}")
+
+# 3. Define Unified search tool with failover and caching
 @mcp.tool()
 async def search_web(query: str, engines: str = None, page: int = 1) -> str:
     """
@@ -144,52 +250,74 @@ async def search_web(query: str, engines: str = None, page: int = 1) -> str:
         logger.info(f"Cache HIT for search query: {query}")
         return cached
         
-    url = SEARXNG_URL.rstrip("/") + "/search"
-    params = {
-        "q": query,
-        "format": "json",
-        "pageno": page
-    }
-    if engines:
-        params["engines"] = engines
+    # Read environment keys
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+    EXA_API_KEY = os.getenv("EXA_API_KEY")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_CX = os.getenv("GOOGLE_CX")
+    BING_API_KEY = os.getenv("BING_API_KEY")
 
-    try:
-        logger.info(f"Querying SearXNG: {url} with query: {query}")
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(url, params=params)
-            if response.status_code != 200:
-                logger.warning(f"SearXNG returned status code {response.status_code}. Falling back to DuckDuckGo HTML search.")
-                result_str = await search_duckduckgo(query)
-                search_cache.set(cache_key, result_str)
-                return result_str
-            
-            data = response.json()
-            results = data.get("results", [])
-            if not results:
-                logger.warning("SearXNG returned no results. Falling back to DuckDuckGo HTML search.")
-                result_str = await search_duckduckgo(query)
-                search_cache.set(cache_key, result_str)
-                return result_str
+    results = None
+    engine_used = None
 
-            formatted_results = []
-            for idx, r in enumerate(results[:10]):
-                title = r.get("title", "No Title")
-                link = r.get("url", "#")
-                snippet = r.get("content", "No content description.")
-                engine = r.get("engine", "Unknown")
-                formatted_results.append(
-                    f"{idx+1}. **[{title}]({link})**\n"
-                    f"   *Source*: {engine}\n"
-                    f"   *Snippet*: {snippet}\n"
-                )
-            result_str = "\n".join(formatted_results)
-            search_cache.set(cache_key, result_str)
-            return result_str
-    except Exception as e:
-        logger.warning(f"Error executing search query via SearXNG: {str(e)}. Falling back to DuckDuckGo HTML search.")
+    # 1. Try Tavily
+    if TAVILY_API_KEY:
+        try:
+            logger.info("Attempting search via Tavily...")
+            results = await search_tavily(query, TAVILY_API_KEY)
+            engine_used = "Tavily"
+        except Exception as e:
+            logger.warning(f"Tavily search failed: {e}. Falling back...")
+
+    # 2. Try Exa
+    if not results and EXA_API_KEY:
+        try:
+            logger.info("Attempting search via Exa...")
+            results = await search_exa(query, EXA_API_KEY)
+            engine_used = "Exa"
+        except Exception as e:
+            logger.warning(f"Exa search failed: {e}. Falling back...")
+
+    # 3. Try Google
+    if not results and GOOGLE_API_KEY and GOOGLE_CX:
+        try:
+            logger.info("Attempting search via Google Custom Search...")
+            results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
+            engine_used = "Google"
+        except Exception as e:
+            logger.warning(f"Google Custom Search failed: {e}. Falling back...")
+
+    # 4. Try Bing
+    if not results and BING_API_KEY:
+        try:
+            logger.info("Attempting search via Bing...")
+            results = await search_bing(query, BING_API_KEY)
+            engine_used = "Bing"
+        except Exception as e:
+            logger.warning(f"Bing search failed: {e}. Falling back...")
+
+    # 5. Fallback to DuckDuckGo HTML Scraper
+    if not results:
+        logger.warning("No search API keys configured or all failed. Falling back to DuckDuckGo HTML search.")
         result_str = await search_duckduckgo(query)
         search_cache.set(cache_key, result_str)
         return result_str
+
+    # Format the results of the chosen engine
+    formatted_results = []
+    for idx, r in enumerate(results[:10]):
+        title = r.get("title", "No Title")
+        link = r.get("url", "#")
+        snippet = r.get("snippet", "No description.")
+        engine = r.get("engine", engine_used)
+        formatted_results.append(
+            f"{idx+1}. **[{title}]({link})**\n"
+            f"   *Source*: {engine}\n"
+            f"   *Snippet*: {snippet}\n"
+        )
+    result_str = "\n".join(formatted_results)
+    search_cache.set(cache_key, result_str)
+    return result_str
 
 # 3. Define Crawl tool with Crawl4AI + Fallback
 async def fallback_crawl(url: str) -> str:
@@ -210,63 +338,232 @@ async def fallback_crawl(url: str) -> str:
         markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
         return markdown_text
 
+def chunk_markdown(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
+    """
+    Splits markdown text into overlapping chunks of maximum size max_chars,
+    respecting paragraph (\\n\\n) and line (\\n) boundaries where possible.
+    """
+    # Safeguard parameters
+    overlap = max(0, min(overlap, max_chars - 1))
+    
+    # 1. Split by double newlines to find paragraphs
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    
+    # Break down paragraphs into smaller atomic segments if they exceed max_chars
+    segments = []
+    for p in paragraphs:
+        if len(p) <= max_chars:
+            segments.append(p)
+        else:
+            # Fallback to line splits for oversized paragraphs
+            lines = [l.strip() for l in p.split("\n") if l.strip()]
+            for line in lines:
+                if len(line) <= max_chars:
+                    segments.append(line)
+                else:
+                    # If a single line is still larger than max_chars, split by character slices with overlap
+                    start = 0
+                    while start < len(line):
+                        end = start + max_chars
+                        segments.append(line[start:end])
+                        start += max_chars - overlap
+                        if start >= len(line) or max_chars <= overlap:
+                            break
+                            
+    chunks = []
+    current_chunk_segments = []
+    current_length = 0
+    
+    for seg in segments:
+        seg_len = len(seg)
+        # If adding this segment exceeds max_chars, finalize the current chunk
+        if current_chunk_segments and current_length + len("\n\n") + seg_len > max_chars:
+            chunk_text = "\n\n".join(current_chunk_segments)
+            chunks.append(chunk_text)
+            
+            # Start a new chunk with trailing segments for overlap
+            overlap_segments = []
+            overlap_len = 0
+            for prev_seg in reversed(current_chunk_segments):
+                if overlap_len + len(prev_seg) + (len("\n\n") if overlap_segments else 0) <= overlap:
+                    overlap_segments.insert(0, prev_seg)
+                    overlap_len += len(prev_seg) + (len("\n\n") if len(overlap_segments) > 1 else 0)
+                else:
+                    break
+            current_chunk_segments = overlap_segments + [seg]
+            current_length = sum(len(s) for s in current_chunk_segments) + (len("\n\n") * (len(current_chunk_segments) - 1))
+        else:
+            current_chunk_segments.append(seg)
+            if current_length > 0:
+                current_length += len("\n\n")
+            current_length += seg_len
+            
+    if current_chunk_segments:
+        chunks.append("\n\n".join(current_chunk_segments))
+        
+    return chunks
+
+def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
+    """
+    Ranks chunks against a query using TF-IDF and Cosine Similarity.
+    Returns a list of tuples: (similarity_score, original_index, chunk_text)
+    """
+    import math
+    from collections import Counter
+    
+    STOP_WORDS = {
+        "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by", 
+        "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+        "this", "that", "these", "those", "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+        "us", "them", "my", "your", "his", "their", "our", "its"
+    }
+    
+    def tokenize(text: str) -> list[str]:
+        words = re.findall(r'[a-zA-Z0-9_]+', text.lower())
+        return [w for w in words if w not in STOP_WORDS]
+        
+    if not chunks:
+        return []
+        
+    query_tokens = tokenize(query)
+    if not query_tokens:
+        # Fallback if query has no tokens: return first 3 chunks with 0 similarity
+        return [(0.0, idx, chunk) for idx, chunk in enumerate(chunks[:3])]
+        
+    chunk_token_lists = [tokenize(c) for c in chunks]
+    
+    # Calculate Document Frequency (DF)
+    N = len(chunks)
+    df = Counter()
+    for tokens in chunk_token_lists:
+        for token in set(tokens):
+            df[token] += 1
+            
+    # Calculate IDF for query tokens
+    idf = {}
+    for token in query_tokens:
+        d_f = df.get(token, 0)
+        idf[token] = math.log((1 + N) / (1 + d_f)) + 1
+        
+    # Vectorize query
+    query_tf = Counter(query_tokens)
+    query_vec = {}
+    query_norm_sq = 0.0
+    for token in set(query_tokens):
+        tf_val = query_tf[token] / len(query_tokens)
+        query_vec[token] = tf_val * idf[token]
+        query_norm_sq += query_vec[token] ** 2
+    query_norm = math.sqrt(query_norm_sq)
+    
+    if query_norm == 0.0:
+        return [(0.0, idx, chunk) for idx, chunk in enumerate(chunks[:3])]
+        
+    ranked = []
+    for idx, (chunk, tokens) in enumerate(zip(chunks, chunk_token_lists)):
+        if not tokens:
+            ranked.append((0.0, idx, chunk))
+            continue
+            
+        chunk_tf = Counter(tokens)
+        chunk_vec = {}
+        chunk_norm_sq = 0.0
+        for token in set(tokens):
+            token_df = df.get(token, 0)
+            token_idf = math.log((1 + N) / (1 + token_df)) + 1
+            tf_val = chunk_tf[token] / len(tokens)
+            chunk_vec[token] = tf_val * token_idf
+            chunk_norm_sq += chunk_vec[token] ** 2
+            
+        chunk_norm = math.sqrt(chunk_norm_sq)
+        
+        dot_product = 0.0
+        for token in set(query_tokens):
+            if token in chunk_vec:
+                dot_product += query_vec[token] * chunk_vec[token]
+                
+        similarity = 0.0 if chunk_norm == 0.0 else dot_product / (query_norm * chunk_norm)
+        ranked.append((similarity, idx, chunk))
+        
+    # Sort by similarity descending
+    ranked.sort(key=lambda x: x[0], reverse=True)
+    return ranked[:3]
+
 @mcp.tool()
-async def crawl_page(url: str) -> str:
+async def crawl_page(url: str, query: str = None) -> str:
     """
     Crawls a specific web page by its URL and extracts its main textual content, converting it into clean, readable Markdown format.
     Use this tool when you have a specific URL (e.g., from search results) and need to read the full body content, documentation, blog post, or article. Do NOT use this tool for search queries (use `search_web` instead).
 
     Args:
         url: The absolute HTTP/HTTPS URL of the web page to crawl. Must start with http:// or https://.
+        query: Optional search query to perform semantic RAG chunking and extract only the top 3 most relevant segments of the webpage, preventing token bloat.
         
     Returns:
-        The full readable content of the webpage represented as clean Markdown, with headers, lists, links, and body text preserved, while removing boilerplate like navigation, headers, footers, scripts, and styles.
+        The full readable content of the webpage represented as clean Markdown (if no query is provided), or the top 3 semantically relevant paragraphs/chunks (if a query is provided).
     """
     global crawl_count
     crawl_count += 1
     
     # Cache lookup
-    cached = crawl_cache.get(url)
-    if cached:
-        logger.info(f"Cache HIT for crawl URL: {url}")
-        return cached
-        
-    run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+    markdown_text = crawl_cache.get(url)
     
-    try:
-        if crawler is None:
-            logger.warning(f"Global Crawl4AI crawler is not initialized. Using temporary crawler context: {url}")
-            browser_conf = BrowserConfig(
-                headless=True,
-                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
-            )
-            async with AsyncWebCrawler(config=browser_conf) as temp_crawler:
-                result = await temp_crawler.arun(url=url, config=run_conf)
-        else:
-            logger.info(f"Crawling with persistent global Crawl4AI browser session: {url}")
-            result = await crawler.arun(url=url, config=run_conf)
-            
-        if result.success and result.markdown:
-            markdown_text = result.markdown
-            # Normalize excessive empty lines
-            markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
-            crawl_cache.set(url, markdown_text)
-            return markdown_text
-        else:
-            err_msg = result.error_message or "Unknown failure"
-            logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
-    except Exception as e:
-        logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
+    if not markdown_text:
+        run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+        try:
+            if crawler is None:
+                logger.warning(f"Global Crawl4AI crawler is not initialized. Using temporary crawler context: {url}")
+                browser_conf = BrowserConfig(
+                    headless=True,
+                    extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage", "--single-process"]
+                )
+                async with AsyncWebCrawler(config=browser_conf) as temp_crawler:
+                    result = await temp_crawler.arun(url=url, config=run_conf)
+            else:
+                logger.info(f"Crawling with persistent global Crawl4AI browser session: {url}")
+                result = await crawler.arun(url=url, config=run_conf)
+                
+            if result.success and result.markdown:
+                markdown_text = result.markdown
+                # Normalize excessive empty lines
+                markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+                crawl_cache.set(url, markdown_text)
+            else:
+                err_msg = result.error_message or "Unknown failure"
+                logger.warning(f"Crawl4AI failed: {err_msg}. Running fallback parser...")
+                markdown_text = None
+        except Exception as e:
+            logger.warning(f"Crawl4AI exception: {str(e)}. Running fallback parser...")
+            markdown_text = None
 
-    # Fallback execution
-    try:
-        logger.info(f"Executing fallback crawler: {url}")
-        text = await fallback_crawl(url)
-        formatted_text = f"*(Fallback Parser Output)*\n\n{text}"
-        crawl_cache.set(url, formatted_text)
-        return formatted_text
-    except Exception as e:
-        return f"Error crawling page '{url}': {str(e)}"
+        if not markdown_text:
+            # Fallback execution
+            try:
+                logger.info(f"Executing fallback crawler: {url}")
+                text = await fallback_crawl(url)
+                markdown_text = f"*(Fallback Parser Output)*\n\n{text}"
+                crawl_cache.set(url, markdown_text)
+            except Exception as e:
+                return f"Error crawling page '{url}': {str(e)}"
+
+    # If query is provided, perform semantic RAG chunking
+    if query:
+        logger.info(f"Performing semantic chunking for query: {query}")
+        chunks = chunk_markdown(markdown_text)
+        if not chunks:
+            return "No content could be extracted from this webpage."
+            
+        top_chunks = rank_chunks(query, chunks)
+        # Format the top chunks
+        total_chunks = len(chunks)
+        formatted_snippets = []
+        for idx, (similarity, orig_idx, chunk_text) in enumerate(top_chunks):
+            formatted_snippets.append(
+                f"### Segment {idx + 1} (Relevance: {similarity:.2f} | Position: {orig_idx + 1}/{total_chunks})\n\n{chunk_text}"
+            )
+        header = f"*Showing top {len(top_chunks)} most relevant segments of the webpage for the query: \"{query}\"*\n\n"
+        return header + "\n\n---\n\n".join(formatted_snippets)
+        
+    return markdown_text
 
 # Uptime text generator
 def get_uptime() -> str:
