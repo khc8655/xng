@@ -456,7 +456,8 @@ def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
     }
     
     def tokenize(text: str) -> list[str]:
-        words = re.findall(r'[a-zA-Z0-9_]+', text.lower())
+        pattern = r'[a-zA-Z0-9_]+|[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]'
+        words = re.findall(pattern, text.lower())
         return [w for w in words if w not in STOP_WORDS]
         
     if not chunks:
@@ -525,6 +526,40 @@ def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
     ranked.sort(key=lambda x: x[0], reverse=True)
     return ranked
 
+def convert_github_url_to_raw(url: str) -> str | None:
+    url_stripped = url.strip()
+    # Match standard file view: https://github.com/{owner}/{repo}/blob/{branch}/{filepath}
+    # Or https://github.com/{owner}/{repo}/raw/{branch}/{filepath}
+    match = re.match(r'https?://github\.com/([^/]+)/([^/]+)/(blob|raw)/([^/]+)/(.*)', url_stripped)
+    if match:
+        owner, repo, _, branch, filepath = match.groups()
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{filepath}"
+        
+    # Match repo homepage: https://github.com/{owner}/{repo} (optionally with trailing slash or .git)
+    match_repo = re.match(r'https?://github\.com/([^/]+)/([^/]+)/?$', url_stripped.rstrip("/"))
+    if match_repo:
+        owner, repo = match_repo.groups()
+        if repo.endswith(".git"):
+            repo = repo[:-4]
+        # Default to main branch, we will fall back to master if this returns 404
+        return f"https://raw.githubusercontent.com/{owner}/{repo}/main/README.md"
+        
+    return None
+
+async def fetch_page_content(url: str) -> str:
+    # 1. Try Scrapfly (Primary Engine)
+    SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
+    if SCRAPFLY_API_KEY:
+        try:
+            logger.info(f"Attempting Scrapfly crawl for: {url}")
+            return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
+        except Exception as e:
+            logger.warning(f"Scrapfly failed: {str(e)}. Falling back to basic HTTP...")
+            
+    # 2. Try standard HTTP client fallback
+    logger.info(f"Executing fallback basic HTTP crawler: {url}")
+    return await fallback_crawl(url)
+
 def generate_markdown_outline(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
     headers = []
@@ -583,27 +618,28 @@ async def crawl_page(url: str, query: str | None = None) -> str:
     markdown_text = crawl_cache.get(url)
     
     if not markdown_text:
-        # 1. Try Scrapfly (Primary Engine)
-        SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
-        if SCRAPFLY_API_KEY:
-            try:
-                logger.info(f"Attempting Scrapfly crawl for: {url}")
-                text = await crawl_scrapfly(url, SCRAPFLY_API_KEY)
-                markdown_text = f"*(Scrapfly Crawler Output)*\n\n{text}"
-                crawl_cache.set(url, markdown_text)
-            except Exception as e:
-                logger.warning(f"Scrapfly failed: {str(e)}. Falling back to basic HTTP...")
-                markdown_text = None
-
-        # 2. Try standard HTTP client fallback
-        if not markdown_text:
-            try:
-                logger.info(f"Executing fallback basic HTTP crawler: {url}")
-                text = await fallback_crawl(url)
-                markdown_text = f"*(Fallback Parser Output)*\n\n{text}"
-                crawl_cache.set(url, markdown_text)
-            except Exception as e:
+        # Check if URL is GitHub and convert it
+        github_raw_url = convert_github_url_to_raw(url)
+        target_url = github_raw_url if github_raw_url else url
+        
+        try:
+            text = await fetch_page_content(target_url)
+            markdown_text = text
+        except Exception as e:
+            # If it's a GitHub URL defaulted to main and failed with 404/empty, try master branch fallback
+            if github_raw_url and "/main/" in github_raw_url and ("404" in str(e) or "empty" in str(e).lower()):
+                fallback_github_url = github_raw_url.replace("/main/", "/master/", 1)
+                logger.info(f"GitHub main branch returned 404. Falling back to master branch: {fallback_github_url}")
+                try:
+                    text = await fetch_page_content(fallback_github_url)
+                    markdown_text = text
+                except Exception as e_inner:
+                    return f"Error crawling GitHub page (failed on both main and master branches): {str(e_inner)}"
+            else:
                 return f"Error crawling page '{url}': {str(e)}"
+                
+        # Cache the result under the ORIGINAL url so next requests hit the cache
+        crawl_cache.set(url, markdown_text)
 
     # If query is None but the webpage is extremely long, return outline to prevent client slowdown
     if not query and len(markdown_text) > 25000:
