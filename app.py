@@ -295,6 +295,56 @@ app.mount("/mcp", sse_asgi_app)
 async def health_check():
     return {"status": "ok", "searxng_url": SEARXNG_URL, "auth_enabled": BEARER_TOKEN is not None}
 
+@app.get("/api/test_searxng")
+async def test_searxng():
+    candidates = [
+        "https://searx.tiekoetter.com/",
+        "https://search.bladerunn.in/",
+        "https://searx.oloke.xyz/",
+        "https://search.mectov.my.id/",
+        "https://search.sapti.me/",
+        "https://searx.ro/",
+        "https://copp.gg/",
+        "https://searx.namejeff.xyz/",
+        "https://search.femboy.ad/",
+        "https://etsi.me/",
+        "https://searx.ononoki.org/",
+        "https://search.2b9t.xyz/",
+        "https://search.rhscz.eu/",
+        "https://searx.rhscz.eu/",
+        "https://searxng.website/",
+        "https://search.privacyredirect.com/",
+        "https://searxng.fishfvch.com/",
+        "https://failsearx.culturanerd.it/",
+        "https://search.ctq.ro/",
+        "https://priv.au/"
+    ]
+    results_status = {}
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        for url in candidates:
+            url = url.rstrip("/")
+            try:
+                res = await client.get(f"{url}/search", params={"q": "apple", "format": "json"}, headers=headers)
+                if res.status_code == 200:
+                    try:
+                        data = res.json()
+                        results = data.get("results", [])
+                        if results:
+                            results_status[url] = f"SUCCESS (count: {len(results)})"
+                        else:
+                            results_status[url] = "EMPTY_RESULTS"
+                    except Exception as e:
+                        results_status[url] = f"INVALID_JSON: {str(e)}"
+                else:
+                    results_status[url] = f"HTTP_{res.status_code}"
+            except Exception as e:
+                results_status[url] = f"ERROR: {type(e).__name__} - {str(e)}"
+    return results_status
+
 # API Endpoint to fetch current stats
 @app.get("/api/stats")
 async def api_stats():
