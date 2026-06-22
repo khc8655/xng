@@ -701,11 +701,8 @@ class TokenAuthMiddleware:
 
         # Route the request based on transport type
         is_streamable_http = False
-        if path in ["/mcp", "/mcp/"]:
-            if method == "POST" or (method == "GET" and session_id_header is not None):
-                is_streamable_http = True
-        elif path in ["/mcp/sse", "/mcp/sse/"]:
-            if method == "POST" or (method == "GET" and session_id_header is not None):
+        if path in ["/mcp", "/mcp/", "/mcp/sse", "/mcp/sse/"]:
+            if method in ["POST", "DELETE"] or (method == "GET" and session_id_header is not None):
                 is_streamable_http = True
 
         if is_streamable_http:
