@@ -24,10 +24,8 @@ WORKDIR $HOME/app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-install Playwright and Chromium dependencies (run as root before switching user)
-RUN playwright install chromium && \
-    playwright install-deps chromium && \
-    chown -R user:user /home/user && \
+# Pre-install dependencies (if any) and set ownership
+RUN chown -R user:user /home/user && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the rest of the application files and set ownership
