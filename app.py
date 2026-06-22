@@ -309,8 +309,33 @@ async def fallback_crawl(url: str) -> str:
             raise Exception(f"HTTP status code {response.status_code}")
             
         soup = BeautifulSoup(response.text, "html.parser")
-        for element in soup(["script", "style", "noscript", "iframe", "header", "footer", "nav"]):
-            element.decompose()
+        for element in list(soup.find_all(True)):
+            # Check tag name
+            if element.name in ["script", "style", "noscript", "iframe", "header", "footer", "nav"]:
+                element.decompose()
+                continue
+            
+            # Check class or id
+            if hasattr(element, "attrs") and element.attrs:
+                class_list = element.attrs.get("class")
+                class_names = "".join(class_list).lower() if isinstance(class_list, list) else str(class_list or "").lower()
+                id_name = str(element.attrs.get("id", "")).lower()
+            else:
+                class_names = ""
+                id_name = ""
+            
+            # Use safe layout noise keywords to avoid deleting main body elements
+            is_noise = False
+            for kw in ["sidebar", "menu", "footer", "aside", "banner", "cookie", "popup", "social-share", "ads"]:
+                if kw in class_names or kw in id_name:
+                    is_noise = True
+                    break
+                    
+            if "site-header" in class_names or "main-nav" in class_names or "site-header" in id_name or "main-nav" in id_name:
+                is_noise = True
+                
+            if is_noise:
+                element.decompose()
             
         body = soup.find("body") or soup
         markdown_text = md(str(body), heading_style="ATX").strip()
@@ -323,11 +348,13 @@ async def crawl_scrapfly(url: str, api_key: str) -> str:
     antibot bypass, and automatic Markdown formatting.
     """
     scrapfly_url = "https://api.scrapfly.io/scrape"
+    exclude_sel = "nav,header,footer,aside,.nav,.menu,.sidebar,.footer,.header,#nav,#menu,#sidebar,#footer,#header,.cookie,.popup,.social-share,.ad-container,.ads"
     params = {
         "key": api_key,
         "url": url,
         "format": "markdown",
-        "only_content": "true"
+        "only_content": "true",
+        "exclude_selectors": exclude_sel
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         logger.info(f"Attempting crawl via Scrapfly API for: {url}")
@@ -496,7 +523,38 @@ def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
         
     # Sort by similarity descending
     ranked.sort(key=lambda x: x[0], reverse=True)
-    return ranked[:3]
+    return ranked
+
+def generate_markdown_outline(markdown_text: str) -> str:
+    lines = markdown_text.split("\n")
+    headers = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            headers.append(stripped)
+            
+    outline = "\n".join(headers)
+    text_length = len(markdown_text)
+    preview = markdown_text[:1200] + "..." if len(markdown_text) > 1200 else markdown_text
+    
+    return f"""⚠️ **Warning: The webpage content is extremely long ({text_length} characters).**
+To prevent context bloat and speed up your response, a structural outline of the page is shown below instead of the full text.
+
+### How to access the full content:
+Please use the `crawl_page` tool again and provide a specific `query` parameter (e.g. `query="Refund Policy"`) to extract only the relevant paragraphs.
+
+---
+
+## Webpage Outline (Headers)
+
+{outline if outline else "*No headers found in the webpage.*"}
+
+---
+
+## Content Preview (First 1200 chars)
+
+{preview}
+"""
 
 @mcp.tool()
 async def crawl_page(url: str, query: str | None = None) -> str:
@@ -506,9 +564,9 @@ async def crawl_page(url: str, query: str | None = None) -> str:
     CRITICAL AGENT INSTRUCTIONS:
     - ALWAYS use this tool when you need to read the content of a specific URL (e.g. from search results, or provided by the user).
     - Do NOT use this tool for general search queries. (Use `search_web` instead).
-    - If the page is too long and you only care about a specific topic, provide the `query` parameter. This will use semantic RAG to extract only the top 3 most relevant paragraphs, saving your token context.
-    - If you need the entire page content, leave `query` as null/None.
-
+    - If the page is too long and you only care about a specific topic, provide the `query` parameter. This will use semantic RAG to extract only the top 6 most relevant paragraphs, saving your token context.
+    - If you need the entire page content, leave `query` as null/None. Note that if the page is extremely long (>25,000 characters), an outline and preview will be returned instead of the full text to avoid client-side slowness.
+    
     Args:
         url: The absolute HTTP/HTTPS URL of the web page to crawl.
         query: Optional. A specific question or topic to extract from the page. If provided, returns only the most relevant snippets. If null, returns the full page content.
@@ -547,22 +605,40 @@ async def crawl_page(url: str, query: str | None = None) -> str:
             except Exception as e:
                 return f"Error crawling page '{url}': {str(e)}"
 
+    # If query is None but the webpage is extremely long, return outline to prevent client slowdown
+    if not query and len(markdown_text) > 25000:
+        return generate_markdown_outline(markdown_text)
+
     # If query is provided, perform semantic RAG chunking
     if query:
         logger.info(f"Performing semantic chunking for query: {query}")
-        chunks = chunk_markdown(markdown_text)
+        chunks = chunk_markdown(markdown_text, max_chars=1500, overlap=300)
         if not chunks:
             return "No content could be extracted from this webpage."
             
         top_chunks = rank_chunks(query, chunks)
+        if not top_chunks:
+            return "No matching content could be ranked."
+            
+        # Check if the highest similarity is 0
+        has_matches = top_chunks and top_chunks[0][0] > 0.0
+        
+        # Sort by similarity descending, return top 6
+        top_chunks_to_return = top_chunks[:6]
+        
+        header = ""
+        if not has_matches:
+            header += "⚠️ **Warning: No direct keyword matches were found for your query.** The webpage might be written in a different language, or the keywords do not exist in the text. Showing the first few paragraphs as fallback. Try searching with keywords matched to the page's actual language.\n\n"
+        
+        header += f"*Showing top {len(top_chunks_to_return)} segments of the webpage for the query: \"{query}\"*\n\n"
+        
         # Format the top chunks
         total_chunks = len(chunks)
         formatted_snippets = []
-        for idx, (similarity, orig_idx, chunk_text) in enumerate(top_chunks):
+        for idx, (similarity, orig_idx, chunk_text) in enumerate(top_chunks_to_return):
             formatted_snippets.append(
                 f"### Segment {idx + 1} (Relevance: {similarity:.2f} | Position: {orig_idx + 1}/{total_chunks})\n\n{chunk_text}"
             )
-        header = f"*Showing top {len(top_chunks)} most relevant segments of the webpage for the query: \"{query}\"*\n\n"
         return header + "\n\n---\n\n".join(formatted_snippets)
         
     return markdown_text
