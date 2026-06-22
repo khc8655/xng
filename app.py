@@ -602,8 +602,8 @@ class SimpleAuthMiddleware:
         path = scope.get("path", "")
         method = scope.get("method", "")
 
-        # Only protect /mcp routes
-        if path.startswith("/mcp") and BEARER_TOKEN:
+        # Only protect /mcp routes, but exclude /mcp/messages since SSE clients do not send headers on POST
+        if path.startswith("/mcp") and not path.startswith("/mcp/messages") and BEARER_TOKEN:
             from urllib.parse import parse_qs
             headers = dict(scope.get("headers", []))
             query_string = scope.get("query_string", b"").decode("utf-8")
