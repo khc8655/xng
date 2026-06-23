@@ -981,26 +981,40 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
+async def init_crawler_bg():
+    global global_crawler
+    if not CRAWL4AI_AVAILABLE:
+        logger.warning("Crawl4AI is not available, skipping crawler startup in background task.")
+        return
+        
+    try:
+        logger.info("Initializing global AsyncWebCrawler in background task...")
+        browser_conf = BrowserConfig(
+            headless=True,
+            text_mode=True,
+            light_mode=True,
+            extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        crawler_instance = AsyncWebCrawler(config=browser_conf)
+        
+        # Start the crawler with a 15-second timeout guard
+        await asyncio.wait_for(crawler_instance.start(), timeout=15.0)
+        global_crawler = crawler_instance
+        logger.info("Global AsyncWebCrawler successfully started in background task.")
+    except asyncio.TimeoutError:
+        logger.error("Failed to initialize global AsyncWebCrawler: Timeout (15s) expired during launch.")
+        global_crawler = None
+    except Exception as e:
+        logger.error(f"Failed to initialize global AsyncWebCrawler in background task: {str(e)}")
+        global_crawler = None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global global_crawler
     if CRAWL4AI_AVAILABLE:
-        try:
-            logger.info("Initializing global AsyncWebCrawler in lifespan...")
-            browser_conf = BrowserConfig(
-                headless=True,
-                text_mode=True,
-                light_mode=True,
-                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
-            )
-            global_crawler = AsyncWebCrawler(config=browser_conf)
-            await global_crawler.start()
-            logger.info("Global AsyncWebCrawler successfully started.")
-        except Exception as e:
-            logger.error(f"Failed to initialize global AsyncWebCrawler: {str(e)}")
-            global_crawler = None
+        # Launch crawler in non-blocking background task
+        asyncio.create_task(init_crawler_bg())
     else:
-        logger.warning("Crawl4AI is not available, skipping crawler startup in lifespan.")
+        logger.warning("Crawl4AI is not available, skipping crawler task creation in lifespan.")
         
     yield
     
