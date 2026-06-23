@@ -30,6 +30,25 @@ except ImportError:
 # Global crawler instance
 global_crawler = None
 
+# Auto-detect memory limits to prevent container OOM crashes on low-resource environments like DCD
+if CRAWL4AI_AVAILABLE:
+    disable_env = os.getenv("DISABLE_LOCAL_BROWSER", "").lower() in ("true", "1", "yes")
+    if disable_env:
+        logger.info("DISABLE_LOCAL_BROWSER environment variable is set. Local browser disabled.")
+        CRAWL4AI_AVAILABLE = False
+    else:
+        try:
+            import psutil
+            total_mem_gb = psutil.virtual_memory().total / (1024 ** 3)
+            logger.info(f"System memory detected: {total_mem_gb:.2f} GB")
+            if total_mem_gb < 1.5:
+                logger.warning(f"System memory ({total_mem_gb:.2f} GB) is less than 1.5 GB. "
+                               "Disabling local browser to prevent container OOM (Out Of Memory) kills.")
+                CRAWL4AI_AVAILABLE = False
+        except Exception as e:
+            logger.warning(f"Could not perform system memory auto-check: {str(e)}")
+
+
 
 def get_active_engines() -> str:
     engines = []
