@@ -435,7 +435,117 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     search_cache.set(cache_key, result_str)
     return result_str
 
-# 3. Define Crawl tool with Crawl4AI + Fallback
+# 3. Define Crawl tool with Crawl4AI + Heuristic Readability Fallback
+def is_blocked_or_empty(text: str) -> bool:
+    if not text or len(text.strip()) < 150:
+        return True
+    
+    # Check for blocking patterns
+    normalized = text.lower()
+    block_signatures = [
+        "cloudflare",
+        "captcha",
+        "enable javascript",
+        "access denied",
+        "403 forbidden",
+        "ddos",
+        "please verify you are a human",
+        "security check",
+        "robot",
+        "distil networks",
+        "perimeterx",
+        "datadome"
+    ]
+    for sig in block_signatures:
+        if sig in normalized:
+            logger.warning(f"Blocking signature detected: '{sig}'")
+            return True
+            
+    return False
+
+def extract_main_content_heuristic(html_content: str, url: str) -> str:
+    soup = BeautifulSoup(html_content, "html.parser")
+    
+    # 1. Clean absolute structural noise first
+    for element in list(soup.find_all(True)):
+        if element.name in ["script", "style", "noscript", "iframe", "header", "footer", "nav", "svg", "form", "aside"]:
+            element.decompose()
+            continue
+            
+    # 2. Score potential main containers (div, article, section)
+    candidates = []
+    for element in soup.find_all(["div", "article", "section"]):
+        text = element.get_text().strip()
+        text_len = len(text)
+        if text_len < 100:
+            continue
+            
+        p_count = len(element.find_all("p"))
+        
+        # Link density calculation: ratio of link text to total text
+        link_text_len = 0
+        for a in element.find_all("a"):
+            link_text_len += len(a.get_text().strip())
+        
+        link_density = link_text_len / text_len if text_len > 0 else 0
+        
+        # Heuristic scoring formula
+        score = p_count * 12 + (text_len // 100)
+        
+        # Class and ID keyword matches
+        class_list = element.attrs.get("class") if hasattr(element, "attrs") and element.attrs else None
+        class_names = "".join(class_list).lower() if isinstance(class_list, list) else str(class_list or "").lower()
+        id_name = str(element.attrs.get("id", "")).lower() if hasattr(element, "attrs") and element.attrs else ""
+        
+        # Positive layout keyword boost
+        for kw in ["content", "article", "body", "text", "story", "main", "post"]:
+            if kw in class_names or kw in id_name:
+                score += 35
+                
+        # Negative layout keyword penalty
+        for kw in ["comment", "footer", "sidebar", "ad", "menu", "nav", "widget", "cookie", "popup", "social-share", "ads", "share"]:
+            if kw in class_names or kw in id_name:
+                score -= 60
+                
+        # High link density penalty (indicative of navigation/menu boxes)
+        if link_density > 0.4:
+            score -= 120
+            
+        candidates.append((score, element))
+        
+    best_element = None
+    if candidates:
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        best_score, best_element = candidates[0]
+        if best_score < 20:
+            best_element = None
+            
+    # Extract only from the highest-scoring container if it passes thresholds
+    target_element = best_element if best_element else (soup.find("body") or soup)
+    
+    # 3. Strip layout noise in the target element
+    for element in list(target_element.find_all(True)):
+        if hasattr(element, "attrs") and element.attrs:
+            class_list = element.attrs.get("class")
+            class_names = "".join(class_list).lower() if isinstance(class_list, list) else str(class_list or "").lower()
+            id_name = str(element.attrs.get("id", "")).lower()
+        else:
+            class_names = ""
+            id_name = ""
+            
+        is_noise = False
+        for kw in ["sidebar", "menu", "footer", "aside", "banner", "cookie", "popup", "social-share", "ads"]:
+            if kw in class_names or kw in id_name:
+                is_noise = True
+                break
+        if is_noise:
+            element.decompose()
+            
+    # Convert to markdown
+    markdown_text = md(str(target_element), heading_style="ATX").strip()
+    markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
+    return markdown_text
+
 async def fallback_crawl(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
@@ -445,39 +555,7 @@ async def fallback_crawl(url: str) -> str:
         if response.status_code != 200:
             raise Exception(f"HTTP status code {response.status_code}")
             
-        soup = BeautifulSoup(response.text, "html.parser")
-        for element in list(soup.find_all(True)):
-            # Check tag name
-            if element.name in ["script", "style", "noscript", "iframe", "header", "footer", "nav"]:
-                element.decompose()
-                continue
-            
-            # Check class or id
-            if hasattr(element, "attrs") and element.attrs:
-                class_list = element.attrs.get("class")
-                class_names = "".join(class_list).lower() if isinstance(class_list, list) else str(class_list or "").lower()
-                id_name = str(element.attrs.get("id", "")).lower()
-            else:
-                class_names = ""
-                id_name = ""
-            
-            # Use safe layout noise keywords to avoid deleting main body elements
-            is_noise = False
-            for kw in ["sidebar", "menu", "footer", "aside", "banner", "cookie", "popup", "social-share", "ads"]:
-                if kw in class_names or kw in id_name:
-                    is_noise = True
-                    break
-                    
-            if "site-header" in class_names or "main-nav" in class_names or "site-header" in id_name or "main-nav" in id_name:
-                is_noise = True
-                
-            if is_noise:
-                element.decompose()
-            
-        body = soup.find("body") or soup
-        markdown_text = md(str(body), heading_style="ATX").strip()
-        markdown_text = re.sub(r'\n{3,}', '\n\n', markdown_text)
-        return markdown_text
+        return extract_main_content_heuristic(response.text, url)
 
 async def crawl_scrapfly(url: str, api_key: str) -> str:
     """
@@ -684,18 +762,42 @@ def convert_github_url_to_raw(url: str) -> str | None:
     return None
 
 async def fetch_page_content(url: str) -> str:
-    # 1. Try Scrapfly (Primary Engine)
     SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
-    if SCRAPFLY_API_KEY:
-        try:
-            logger.info(f"Attempting Scrapfly crawl for: {url}")
-            return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
-        except Exception as e:
-            logger.warning(f"Scrapfly failed: {str(e)}. Falling back to basic HTTP...")
-            
-    # 2. Try standard HTTP client fallback
-    logger.info(f"Executing fallback basic HTTP crawler: {url}")
-    return await fallback_crawl(url)
+    
+    # 1. Try local HTTP client with heuristic readability first
+    logger.info(f"Attempting local HTTP crawl first: {url}")
+    local_text = ""
+    local_failed = False
+    try:
+        local_text = await fallback_crawl(url)
+    except Exception as e:
+        logger.warning(f"Local HTTP crawl failed: {str(e)}")
+        local_failed = True
+        
+    # 2. Check if local crawl was blocked, empty, or failed
+    if local_failed or is_blocked_or_empty(local_text):
+        if SCRAPFLY_API_KEY:
+            logger.info(f"Local crawl blocked/empty/failed. Failing over to Scrapfly API for: {url}")
+            try:
+                return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
+            except Exception as e_scrapfly:
+                logger.error(f"Scrapfly failover also failed: {str(e_scrapfly)}")
+                if not local_failed and local_text:
+                    logger.info("Returning partially blocked local text since Scrapfly also failed.")
+                    return local_text
+                raise Exception(f"Crawl failed on both local and Scrapfly: {str(e_scrapfly)}")
+        else:
+            logger.warning("Local crawl was blocked/empty/failed, but Scrapfly API key is not configured.")
+            if not local_failed and local_text:
+                return local_text
+            if local_failed:
+                raise Exception("Local HTTP request failed and no Scrapfly key configured to failover.")
+            else:
+                raise Exception("Local HTTP request returned blocked/empty content and no Scrapfly key configured to failover.")
+                
+    # If local crawl succeeded and is not blocked/empty, return it!
+    logger.info(f"Local HTTP crawl succeeded and passed verification for: {url}")
+    return local_text
 
 def generate_markdown_outline(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
