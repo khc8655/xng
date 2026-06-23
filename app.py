@@ -1,4 +1,5 @@
 import os
+import asyncio
 import logging
 import re
 import time
@@ -64,7 +65,7 @@ mcp = FastMCP(
 )
 
 # 2. Define DuckDuckGo search fallback helper
-async def search_duckduckgo(query: str) -> str:
+async def search_duckduckgo_raw(query: str) -> list[dict]:
     import urllib.parse
     url = "https://html.duckduckgo.com/html/"
     params = {"q": query}
@@ -76,17 +77,15 @@ async def search_duckduckgo(query: str) -> str:
         async with httpx.AsyncClient(timeout=10.0) as client:
             res = await client.post(url, data=params, headers=headers)
             if res.status_code != 200:
-                return f"Error: DuckDuckGo returned status code {res.status_code}."
+                return []
                 
             soup = BeautifulSoup(res.text, "html.parser")
             results = soup.select(".result")
             if not results:
-                return "No search results found for the query."
+                return []
                 
-            formatted_results = []
-            organic_idx = 1
+            organic_results = []
             for result in results:
-                # Skip ad result cards
                 classes = result.get("class", [])
                 if "result--ad" in classes:
                     continue
@@ -100,7 +99,6 @@ async def search_duckduckgo(query: str) -> str:
                     raw_link = a_el["href"]
                     snippet = snippet_el.text.strip() if snippet_el else "No description."
                     
-                    # Filter out ad redirect URLs
                     if "y.js?" in raw_link or "ad_provider" in raw_link:
                         continue
                         
@@ -112,20 +110,18 @@ async def search_duckduckgo(query: str) -> str:
                     elif raw_link.startswith("//"):
                         link = "https:" + raw_link
                         
-                    formatted_results.append(
-                        f"{organic_idx}. **[{title}]({link})**\n"
-                        f"   *Source*: DuckDuckGo (Fallback)\n"
-                        f"   *Snippet*: {snippet}\n"
-                    )
-                    organic_idx += 1
-                    if organic_idx > 10:
+                    organic_results.append({
+                        "title": title,
+                        "url": link,
+                        "snippet": snippet,
+                        "engine": "DuckDuckGo"
+                    })
+                    if len(organic_results) >= 10:
                         break
-                        
-            if not formatted_results:
-                return "No organic search results found."
-            return "\n".join(formatted_results)
+            return organic_results
     except Exception as e:
-        return f"Error executing DuckDuckGo search: {str(e)}"
+        logger.error(f"Error executing raw DuckDuckGo search: {str(e)}")
+        return []
 
 # Helper functions for the Search Aggregator Gateway
 async def search_tavily(query: str, api_key: str) -> list[dict]:
@@ -209,6 +205,108 @@ async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
         else:
             raise Exception(f"Google returned status code {r.status_code}")
 
+async def search_zhihu(query: str, count: int = 5) -> list[dict]:
+    """
+    Search Zhihu content using the official developer API.
+    """
+    secret = os.getenv("ZHIHU_ACCESS_SECRET") or os.getenv("ZHIHU_API_KEY")
+    if not secret:
+        logger.warning("Zhihu Access Secret (ZHIHU_ACCESS_SECRET/ZHIHU_API_KEY) is not configured.")
+        return []
+        
+    base_url = os.getenv("ZHIHU_OPENAPI_BASE_URL", "https://developer.zhihu.com").strip().rstrip("/")
+    endpoint = f"{base_url}/api/v1/content/zhihu_search"
+    
+    params = {
+        "Query": query,
+        "Count": str(count)
+    }
+    
+    headers = {
+        "Authorization": f"Bearer {secret}",
+        "X-Request-Timestamp": str(int(time.time())),
+        "User-Agent": "Multi-Engine-Search-Crawl-MCP/1.0",
+        "Content-Type": "application/json"
+    }
+    
+    # SSL config
+    skip_verify = os.getenv("ZHIHU_SKIP_TLS_VERIFY", "").strip() == "1"
+    require_verify = os.getenv("ZHIHU_REQUIRE_TLS_VERIFY", "").strip() == "1"
+    verify_opt = True
+    if skip_verify:
+        verify_opt = False
+    elif not require_verify:
+        try:
+            import certifi
+            verify_opt = certifi.where()
+        except ImportError:
+            verify_opt = False
+            
+    try:
+        async with httpx.AsyncClient(timeout=15.0, verify=verify_opt) as client:
+            logger.info(f"Attempting search via Zhihu API for query: {query}")
+            r = await client.get(endpoint, params=params, headers=headers)
+            if r.status_code != 200:
+                logger.error(f"Zhihu API failed with status {r.status_code}: {r.text}")
+                return []
+                
+            resp_data = r.json()
+            data = resp_data.get("Data") if isinstance(resp_data.get("Data"), dict) else {}
+            items = data.get("Items") if isinstance(data.get("Items"), list) else []
+            
+            results = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                results.append({
+                    "title": item.get("Title", ""),
+                    "url": item.get("Url", ""),
+                    "snippet": item.get("ContentText", ""),
+                    "engine": f"Zhihu (upvotes: {item.get('VoteUpCount', 0)} | comments: {item.get('CommentCount', 0)})"
+                })
+            return results
+    except Exception as e:
+        logger.error(f"Error querying Zhihu search API: {str(e)}")
+        return []
+
+async def run_general_web_search(query: str) -> tuple[list[dict], str]:
+    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+    EXA_API_KEY = os.getenv("EXA_API_KEY")
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+    GOOGLE_CX = os.getenv("GOOGLE_CX")
+    
+    # 1. Try Tavily
+    if TAVILY_API_KEY:
+        try:
+            logger.info("Attempting search via Tavily...")
+            results = await search_tavily(query, TAVILY_API_KEY)
+            return results, "Tavily"
+        except Exception as e:
+            logger.warning(f"Tavily search failed: {e}. Falling back...")
+            
+    # 2. Try Exa
+    if EXA_API_KEY:
+        try:
+            logger.info("Attempting search via Exa...")
+            results = await search_exa(query, EXA_API_KEY)
+            return results, "Exa"
+        except Exception as e:
+            logger.warning(f"Exa search failed: {e}. Falling back...")
+            
+    # 3. Try Google
+    if GOOGLE_API_KEY and GOOGLE_CX:
+        try:
+            logger.info("Attempting search via Google Custom Search...")
+            results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
+            return results, "Google"
+        except Exception as e:
+            logger.warning(f"Google Custom Search failed: {e}. Falling back...")
+            
+    # 4. Fallback to DuckDuckGo
+    logger.info("Executing DuckDuckGo fallback raw search.")
+    results = await search_duckduckgo_raw(query)
+    return results, "DuckDuckGo"
+
 # 3. Define Unified search tool with failover and caching
 @mcp.tool()
 async def search_web(query: str, engines: str | None = None, page: int = 1) -> str:
@@ -223,7 +321,9 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
 
     Args:
         query: The specific search query. Keep it concise, keyword-focused, and descriptive (e.g., "Python 3.11 release notes").
-        engines: Optional. Comma-separated list of engines (e.g., "Tavily, Exa, Google"). Leave as null/None to use all available defaults.
+        engines: Optional. Comma-separated list of engines (e.g., "Tavily, Exa, Google, Zhihu"). 
+                 Specify "Zhihu" to search Zhihu content only. Specify "hybrid" or "all" to search both general web and Zhihu in parallel and merge results.
+                 Leave as null/None to use all available web defaults.
         page: Optional. The page number for pagination. Defaults to 1. Increment if you need more results for the same query.
         
     Returns:
@@ -240,51 +340,87 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         return cached
         
     # Read environment keys
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-    EXA_API_KEY = os.getenv("EXA_API_KEY")
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    GOOGLE_CX = os.getenv("GOOGLE_CX")
+    ZHIHU_SECRET = os.getenv("ZHIHU_ACCESS_SECRET") or os.getenv("ZHIHU_API_KEY")
 
-    results = None
+    # Parse engines option
+    engines_list = [e.strip().lower() for e in engines.split(",")] if engines else []
+
+    web_results = []
+    zhihu_results = []
     engine_used = None
+    
+    # 1. Check if only "zhihu" is requested
+    if len(engines_list) == 1 and engines_list[0] == "zhihu":
+        if not ZHIHU_SECRET:
+            return "Error: Zhihu search was requested, but ZHIHU_ACCESS_SECRET or ZHIHU_API_KEY is not configured in environment variables."
+        zhihu_results = await search_zhihu(query)
+        engine_used = "Zhihu"
+        
+    # 2. Check if hybrid / all / both requested
+    elif "hybrid" in engines_list or "all" in engines_list or ("zhihu" in engines_list and len(engines_list) > 1):
+        # Run both in parallel
+        web_task = asyncio.create_task(run_general_web_search(query))
+        
+        if ZHIHU_SECRET:
+            zhihu_task = asyncio.create_task(search_zhihu(query))
+            web_res_tuple, zhihu_res = await asyncio.gather(web_task, zhihu_task)
+            web_results, engine_used = web_res_tuple
+            zhihu_results = zhihu_res
+        else:
+            logger.warning("Zhihu is requested in hybrid search, but ZHIHU_ACCESS_SECRET/ZHIHU_API_KEY is not set. Defaulting to general search only.")
+            web_results, engine_used = await web_task
+        
+    # 3. Else, default web search (with optional forced single engine)
+    else:
+        TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+        EXA_API_KEY = os.getenv("EXA_API_KEY")
+        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+        GOOGLE_CX = os.getenv("GOOGLE_CX")
+        
+        forced_engine = None
+        for eng in engines_list:
+            if eng in ["tavily", "exa", "google", "duckduckgo"]:
+                forced_engine = eng
+                break
+                
+        if forced_engine == "tavily" and TAVILY_API_KEY:
+            try:
+                web_results = await search_tavily(query, TAVILY_API_KEY)
+                engine_used = "Tavily"
+            except Exception as e:
+                return f"Error: Forced Tavily search failed: {e}"
+        elif forced_engine == "exa" and EXA_API_KEY:
+            try:
+                web_results = await search_exa(query, EXA_API_KEY)
+                engine_used = "Exa"
+            except Exception as e:
+                return f"Error: Forced Exa search failed: {e}"
+        elif forced_engine == "google" and GOOGLE_API_KEY and GOOGLE_CX:
+            try:
+                web_results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
+                engine_used = "Google"
+            except Exception as e:
+                return f"Error: Forced Google search failed: {e}"
+        elif forced_engine == "duckduckgo":
+            web_results = await search_duckduckgo_raw(query)
+            engine_used = "DuckDuckGo"
+        else:
+            # Fallback priority list
+            web_res_tuple, engine_used = await run_general_web_search(query)
+            web_results = web_res_tuple
 
-    # 1. Try Tavily
-    if TAVILY_API_KEY:
-        try:
-            logger.info("Attempting search via Tavily...")
-            results = await search_tavily(query, TAVILY_API_KEY)
-            engine_used = "Tavily"
-        except Exception as e:
-            logger.warning(f"Tavily search failed: {e}. Falling back...")
-
-    # 2. Try Exa
-    if not results and EXA_API_KEY:
-        try:
-            logger.info("Attempting search via Exa...")
-            results = await search_exa(query, EXA_API_KEY)
-            engine_used = "Exa"
-        except Exception as e:
-            logger.warning(f"Exa search failed: {e}. Falling back...")
-
-    # 3. Try Google
-    if not results and GOOGLE_API_KEY and GOOGLE_CX:
-        try:
-            logger.info("Attempting search via Google Custom Search...")
-            results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
-            engine_used = "Google"
-        except Exception as e:
-            logger.warning(f"Google Custom Search failed: {e}. Falling back...")
-
-    # 4. Fallback to DuckDuckGo HTML Scraper
-    if not results:
-        logger.warning("No search API keys configured or all failed. Falling back to DuckDuckGo HTML search.")
-        result_str = await search_duckduckgo(query)
-        search_cache.set(cache_key, result_str)
-        return result_str
-
-    # Format the results of the chosen engine
+    # Merge results
+    all_items = []
+    if zhihu_results:
+        all_items.extend(zhihu_results)
+    if web_results:
+        all_items.extend(web_results)
+        
+    if not all_items:
+        return "No search results found."
+        
     formatted_results = []
-    for idx, r in enumerate(results[:10]):
+    for idx, r in enumerate(all_items[:10]):
         title = r.get("title", "No Title")
         link = r.get("url", "#")
         snippet = r.get("snippet", "No description.")
@@ -294,6 +430,7 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
             f"   *Source*: {engine}\n"
             f"   *Snippet*: {snippet}\n"
         )
+        
     result_str = "\n".join(formatted_results)
     search_cache.set(cache_key, result_str)
     return result_str
