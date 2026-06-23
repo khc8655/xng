@@ -236,7 +236,7 @@ async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
         else:
             raise Exception(f"Google returned status code {r.status_code}")
 
-async def search_zhihu(query: str, count: int = 5) -> list[dict]:
+async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
     """
     Search Zhihu content using the official developer API.
     """
@@ -338,6 +338,32 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     results = await search_duckduckgo_raw(query)
     return results, "DuckDuckGo"
 
+# 3. Define Zhihu search tool
+@mcp.tool()
+async def search_zhihu(query: str, count: int = 5) -> str:
+    """
+    Search Zhihu content directly using the official developer API.
+    
+    Args:
+        query: The search query string.
+        count: Optional. Number of search results to return. Defaults to 5.
+    """
+    try:
+        results = await search_zhihu_impl(query, count=count)
+        if not results:
+            return "No results found or Zhihu search is not configured."
+            
+        formatted = []
+        for idx, item in enumerate(results, 1):
+            formatted.append(
+                f"{idx}. **[{item['title']}]({item['url']})**\n"
+                f"   Engine: {item.get('engine', 'Zhihu')}\n"
+                f"   Snippet: {item['snippet']}\n"
+            )
+        return "\n".join(formatted)
+    except Exception as e:
+        return f"Error executing Zhihu search: {str(e)}"
+
 # 3. Define Unified search tool with failover and caching
 @mcp.tool()
 async def search_web(query: str, engines: str | None = None, page: int = 1) -> str:
@@ -384,7 +410,7 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     if len(engines_list) == 1 and engines_list[0] == "zhihu":
         if not ZHIHU_SECRET:
             return "Error: Zhihu search was requested, but ZHIHU_ACCESS_SECRET or ZHIHU_API_KEY is not configured in environment variables."
-        zhihu_results = await search_zhihu(query)
+        zhihu_results = await search_zhihu_impl(query)
         engine_used = "Zhihu"
         
     # 2. Check if hybrid / all / both requested
@@ -393,7 +419,7 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         web_task = asyncio.create_task(run_general_web_search(query))
         
         if ZHIHU_SECRET:
-            zhihu_task = asyncio.create_task(search_zhihu(query))
+            zhihu_task = asyncio.create_task(search_zhihu_impl(query))
             web_res_tuple, zhihu_res = await asyncio.gather(web_task, zhihu_task)
             web_results, engine_used = web_res_tuple
             zhihu_results = zhihu_res
