@@ -1139,6 +1139,8 @@ async def api_stats():
         "uptime": get_uptime(),
         "active_engines": get_active_engines(),
         "auth_enabled": BEARER_TOKEN is not None,
+        "crawl4ai_available": CRAWL4AI_AVAILABLE,
+        "crawl4ai_active": global_crawler is not None,
         "stats": {
             "searches": search_count,
             "crawls": crawl_count
@@ -1497,7 +1499,7 @@ async def dashboard(request: Request):
                     <ul class="card-details-list">
                         <li>
                             <span>爬虫引擎</span>
-                            <span class="active-text">Playwright (Chromium)</span>
+                            <span id="crawler-engine">加载中...</span>
                         </li>
                     </ul>
                 </div>
@@ -1619,6 +1621,18 @@ async def dashboard(request: Request):
                         authIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-shield-halved"></i> 已启用</span>';
                     }} else {{
                         authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> 未启用</span>';
+                    }}
+                    
+                    // Crawler Engine indicator
+                    const crawlerEngine = document.getElementById('crawler-engine');
+                    if (crawlerEngine) {{
+                        if (data.crawl4ai_active) {{
+                            crawlerEngine.innerHTML = '<span class="active-text"><i class="fa-solid fa-spider"></i> Playwright (Chromium)</span>';
+                        }} else if (data.crawl4ai_available) {{
+                            crawlerEngine.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-spinner fa-spin"></i> 正在启动...</span>';
+                        }} else {{
+                            crawlerEngine.innerHTML = '<span class="inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-microchip"></i> Heuristics + Scrapfly (轻量降级)</span>';
+                        }}
                     }}
                     
                 }} catch (e) {{
