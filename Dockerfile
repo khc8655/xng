@@ -24,6 +24,9 @@ WORKDIR $HOME/app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Install Playwright Chromium and system dependencies
+RUN playwright install chromium --with-deps
+
 # Pre-install dependencies (if any) and set ownership
 RUN chown -R user:user /home/user && \
     rm -rf /var/lib/apt/lists/*

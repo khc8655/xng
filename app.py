@@ -19,6 +19,18 @@ logger = logging.getLogger("mcp-server")
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 
+# Optional import for crawl4ai
+try:
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+    CRAWL4AI_AVAILABLE = True
+except ImportError:
+    CRAWL4AI_AVAILABLE = False
+    logger.warning("crawl4ai is not installed. Local dynamic crawl will be skipped.")
+
+# Global crawler instance
+global_crawler = None
+
+
 def get_active_engines() -> str:
     engines = []
     if os.getenv("TAVILY_API_KEY"):
@@ -774,30 +786,65 @@ async def fetch_page_content(url: str) -> str:
         logger.warning(f"Local HTTP crawl failed: {str(e)}")
         local_failed = True
         
-    # 2. Check if local crawl was blocked, empty, or failed
-    if local_failed or is_blocked_or_empty(local_text):
-        if SCRAPFLY_API_KEY:
-            logger.info(f"Local crawl blocked/empty/failed. Failing over to Scrapfly API for: {url}")
-            try:
-                return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
-            except Exception as e_scrapfly:
-                logger.error(f"Scrapfly failover also failed: {str(e_scrapfly)}")
-                if not local_failed and local_text:
-                    logger.info("Returning partially blocked local text since Scrapfly also failed.")
-                    return local_text
-                raise Exception(f"Crawl failed on both local and Scrapfly: {str(e_scrapfly)}")
-        else:
-            logger.warning("Local crawl was blocked/empty/failed, but Scrapfly API key is not configured.")
-            if not local_failed and local_text:
-                return local_text
-            if local_failed:
-                raise Exception("Local HTTP request failed and no Scrapfly key configured to failover.")
-            else:
-                raise Exception("Local HTTP request returned blocked/empty content and no Scrapfly key configured to failover.")
+    # Check if local crawl succeeded and passed verification
+    if not local_failed and not is_blocked_or_empty(local_text):
+        logger.info(f"Local HTTP crawl succeeded and passed verification for: {url}")
+        return local_text
+        
+    # 2. Try local Crawl4AI (dynamic browser rendering) if available
+    crawl4ai_text = ""
+    crawl4ai_failed = True
+    if global_crawler is not None:
+        logger.info(f"Local HTTP failed/blocked. Attempting local Crawl4AI crawl for: {url}")
+        try:
+            run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+            result = await global_crawler.arun(url=url, config=run_conf)
+            if result.success and result.markdown:
+                if isinstance(result.markdown, str):
+                    extracted_text = result.markdown
+                else:
+                    extracted_text = result.markdown.raw_markdown if hasattr(result.markdown, 'raw_markdown') else ""
                 
-    # If local crawl succeeded and is not blocked/empty, return it!
-    logger.info(f"Local HTTP crawl succeeded and passed verification for: {url}")
-    return local_text
+                if extracted_text:
+                    crawl4ai_text = extracted_text
+                    if not is_blocked_or_empty(crawl4ai_text):
+                        logger.info(f"Local Crawl4AI crawl succeeded and passed verification for: {url}")
+                        return crawl4ai_text
+                    else:
+                        logger.warning(f"Local Crawl4AI returned blocked or empty content for: {url}")
+                        crawl4ai_failed = False  # Succeeded execution but blocked
+            else:
+                err = result.error_message if hasattr(result, "error_message") else "Empty content"
+                logger.warning(f"Local Crawl4AI execution returned success=False or empty: {err}")
+        except Exception as e_c4ai:
+            logger.error(f"Local Crawl4AI execution failed with error: {str(e_c4ai)}")
+    else:
+        logger.info("Local Crawl4AI is not initialized/available. Skipping local dynamic crawl.")
+
+    # 3. Failover to Scrapfly API if configured
+    if SCRAPFLY_API_KEY:
+        logger.info(f"Local crawl paths failed/blocked. Failing over to Scrapfly API for: {url}")
+        try:
+            return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
+        except Exception as e_scrapfly:
+            logger.error(f"Scrapfly failover also failed: {str(e_scrapfly)}")
+            # Return any partial result we got
+            if crawl4ai_text:
+                logger.info("Returning Crawl4AI text since Scrapfly also failed.")
+                return crawl4ai_text
+            if not local_failed and local_text:
+                logger.info("Returning partially blocked local text since Scrapfly also failed.")
+                return local_text
+            raise Exception(f"Crawl failed on all local methods and Scrapfly: {str(e_scrapfly)}")
+    else:
+        logger.warning("Local crawl paths failed/blocked, and Scrapfly API key is not configured.")
+        # Return best available local text
+        if crawl4ai_text:
+            return crawl4ai_text
+        if not local_failed and local_text:
+            return local_text
+        raise Exception("All local crawl methods failed/blocked, and no Scrapfly key configured for failover.")
+
 
 def generate_markdown_outline(markdown_text: str) -> str:
     lines = markdown_text.split("\n")
@@ -934,8 +981,40 @@ def get_uptime() -> str:
     parts.append(f"{seconds}s")
     return " ".join(parts)
 
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global global_crawler
+    if CRAWL4AI_AVAILABLE:
+        try:
+            logger.info("Initializing global AsyncWebCrawler in lifespan...")
+            browser_conf = BrowserConfig(
+                headless=True,
+                text_mode=True,
+                light_mode=True,
+                extra_args=["--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage"]
+            )
+            global_crawler = AsyncWebCrawler(config=browser_conf)
+            await global_crawler.start()
+            logger.info("Global AsyncWebCrawler successfully started.")
+        except Exception as e:
+            logger.error(f"Failed to initialize global AsyncWebCrawler: {str(e)}")
+            global_crawler = None
+    else:
+        logger.warning("Crawl4AI is not available, skipping crawler startup in lifespan.")
+        
+    yield
+    
+    if global_crawler:
+        logger.info("Closing global AsyncWebCrawler...")
+        try:
+            await global_crawler.close()
+            logger.info("Global AsyncWebCrawler closed.")
+        except Exception as e:
+            logger.error(f"Error closing global AsyncWebCrawler: {str(e)}")
+
 # Create FastAPI app
-app = FastAPI(title="Multi-Engine Search & Crawl MCP Server")
+app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
+
 
 class SimpleAuthMiddleware:
     """
