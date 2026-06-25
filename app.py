@@ -84,8 +84,8 @@ class TTLCache:
     def set(self, key, val):
         self.cache[key] = (val, time.time())
 
-search_cache = TTLCache(ttl_seconds=600)
-crawl_cache = TTLCache(ttl_seconds=600)
+search_cache = TTLCache(ttl_seconds=1800)
+crawl_cache = TTLCache(ttl_seconds=1800)
 
 # 1. Initialize FastMCP with DNS rebinding protection disabled for cloud/proxy deployments
 mcp = FastMCP(
@@ -342,10 +342,15 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
 @mcp.tool()
 async def search_zhihu(query: str, count: int = 5) -> str:
     """
-    Search Zhihu content directly using the official developer API.
+    Search Zhihu (知乎) for Chinese Q&A, articles, opinions, and community discussions.
+    
+    CRITICAL INSTRUCTIONS FOR HIGH EFFICIENCY:
+    - Use this tool ONLY when seeking domestic Chinese community answers, developer experiences on Zhihu, or local opinions.
+    - Formulate your search query in Chinese for better results.
+    - Do NOT use this tool for general international programming questions, official documentation, or global news; use `search_web` instead.
     
     Args:
-        query: The search query string.
+        query: The search query string (prefer Chinese keywords).
         count: Optional. Number of search results to return. Defaults to 5.
     """
     try:
@@ -368,23 +373,23 @@ async def search_zhihu(query: str, count: int = 5) -> str:
 @mcp.tool()
 async def search_web(query: str, engines: str | None = None, page: int = 1) -> str:
     """
-    Perform a broad web search to find real-time information, news, answers, or references.
+    Perform a broad web search to find real-time information, news, answers, or documentation.
     
-    CRITICAL AGENT INSTRUCTIONS:
-    - ALWAYS use this tool FIRST when asked about current events, facts, documentation, or unknown topics.
-    - If the user provides a specific URL to read, do NOT use this tool. Use `crawl_page` instead.
-    - If your search returns a list of URLs but you need the deep content of a specific result, pass that URL to `crawl_page`.
-    - Do NOT hallucinate search results. Only return information present in the snippet.
-
+    CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
+    - **Search First**: Use this tool to look up current events, programming APIs, documentation, or factual queries.
+    - **Formulate Clean Queries**: Do NOT search using full sentences, conversational phrases, or questions (e.g., avoid "how do I do x in y"). Use concise, space-separated keywords/nouns (e.g., "FastAPI CORS middleware configuration").
+    - **Evaluate Before Retrying**: Read the returned search snippets carefully. Frequently, the answer is already in the snippets, or they contain a direct documentation URL that you can crawl. 
+    - **Minimize Attempts (Aim for 1-2)**: Avoid search loops or repeatedly querying similar keywords. If your first query fails, refine it *precisely once* by adding specific keywords (e.g., version numbers, error codes, file formats, or domain limits like `site:github.com`). Do NOT execute more than 2 searches for the same topic.
+    - **Language Strategy**: Use English keywords for technical, programming, or documentation searches to get the best sources. Use Chinese keywords for domestic topics or Chinese news.
+    - **Specific URL**: If you already have a target URL (from search results or user input), do NOT search. Use `crawl_page` directly to fetch the page content.
+    - **No Hallucinations**: Only state facts found directly in the search snippets or crawled content.
+    
     Args:
-        query: The specific search query. Keep it concise, keyword-focused, and descriptive (e.g., "Python 3.11 release notes").
-        engines: Optional. Comma-separated list of engines (e.g., "Tavily, Exa, Google, Zhihu"). 
-                 Specify "Zhihu" to search Zhihu content only. Specify "hybrid" or "all" to search both general web and Zhihu in parallel and merge results.
-                 Leave as null/None to use all available web defaults.
-        page: Optional. The page number for pagination. Defaults to 1. Increment if you need more results for the same query.
-        
-    Returns:
-        A Markdown-formatted list of up to 10 search results containing titles, snippets, and source URLs.
+        query: Core search keywords (e.g., "Python 3.12 syntax changes"). Avoid conversational questions.
+        engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Google", "Zhihu"). 
+                 Use "Zhihu" for Chinese forum opinions. Use "hybrid" or "all" to search general web and Zhihu in parallel. 
+                 Leave as null/None to use available defaults (highly recommended for general queries).
+        page: Optional. Page number for pagination. Defaults to 1.
     """
     global search_count
     search_count += 1
@@ -925,20 +930,17 @@ Please use the `crawl_page` tool again and provide a specific `query` parameter 
 @mcp.tool()
 async def crawl_page(url: str, query: str | None = None) -> str:
     """
-    Crawl a specific webpage by its URL to extract and read its full textual content in Markdown format.
+    Crawl a specific webpage by its URL to extract and read its full content in clean Markdown format.
     
-    CRITICAL AGENT INSTRUCTIONS:
-    - ALWAYS use this tool when you need to read the content of a specific URL (e.g. from search results, or provided by the user).
-    - Do NOT use this tool for general search queries. (Use `search_web` instead).
-    - If the page is too long and you only care about a specific topic, provide the `query` parameter. This will use semantic RAG to extract only the top 6 most relevant paragraphs, saving your token context.
-    - If you need the entire page content, leave `query` as null/None. Note that if the page is extremely long (>25,000 characters), an outline and preview will be returned instead of the full text to avoid client-side slowness.
+    CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
+    - **Use for Specific URLs**: Call this tool when you have a target URL (from search results or user input) and need to read its deep content.
+    - **Avoid Searching**: Do NOT pass general search queries or questions into the `url` parameter. (Use `search_web` instead).
+    - **Semantic Filtering (RAG)**: If you are looking for a specific topic or answering a user's question, **ALWAYS provide the `query` parameter**. This uses local semantic RAG to extract only the top 6 most relevant paragraphs, which prevents token context bloat and speeds up processing.
+    - **Full Page Content**: Leave `query` as null/None ONLY if you absolutely need to read the entire document. Note that if the page is extremely long (>25,000 characters), an outline and preview will be returned instead of the full text to avoid client-side slowdowns.
     
     Args:
-        url: The absolute HTTP/HTTPS URL of the web page to crawl.
-        query: Optional. A specific question or topic to extract from the page. If provided, returns only the most relevant snippets. If null, returns the full page content.
-        
-    Returns:
-        Clean Markdown content of the webpage, or extracted semantic snippets if a query was provided.
+        url: The absolute HTTP/HTTPS URL of the webpage to crawl.
+        query: Optional. A specific question or topic to extract from the page. If provided, returns only the top 6 semantically relevant snippets. If null, returns full content.
     """
     global crawl_count
     crawl_count += 1
