@@ -58,6 +58,8 @@ def get_active_engines() -> str:
         engines.append("Exa")
     if os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_CX"):
         engines.append("Google")
+    if os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY"):
+        engines.append("Volcengine")
     engines.append("DuckDuckGo (Free)")
     return ", ".join(engines)
 
@@ -153,6 +155,53 @@ async def search_duckduckgo_raw(query: str) -> list[dict]:
     except Exception as e:
         logger.error(f"Error executing raw DuckDuckGo search: {str(e)}")
         return []
+
+def is_chinese_query(query: str) -> bool:
+    """Detect if the query contains any Chinese characters."""
+    return bool(re.search(r'[\u4e00-\u9fff]', query))
+
+async def search_volcengine(query: str, api_key: str) -> list[dict]:
+    """Search the web using Volcengine Custom Search API."""
+    url = "https://open.feedcoopapi.com/search_api/web_search"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}"
+    }
+    payload = {
+        "Query": query,
+        "SearchType": "web",
+        "Count": 10,
+        "Filter": {
+            "NeedContent": False,
+            "NeedUrl": True
+        },
+        "NeedSummary": True
+    }
+    logger.info(f"search_volcengine API call: Query='{query}', Key='{api_key[:4]}...{api_key[-4:]}'")
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
+        logger.info(f"search_volcengine API response status: {r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            logger.info(f"search_volcengine response keys: {list(data.keys())}")
+            result = data.get("Result", {})
+            if not result:
+                logger.warning("search_volcengine: 'Result' is empty or null")
+                return []
+            web_results = result.get("WebResults", [])
+            logger.info(f"search_volcengine: WebResults count = {len(web_results)}")
+            return [
+                {
+                    "title": item.get("Title", "No Title"),
+                    "url": item.get("Url", "#"),
+                    "snippet": item.get("Summary") or item.get("Snippet") or "No description.",
+                    "engine": f"Volcengine (Relevance: {item.get('RankScore', 0.0) * 100:.1f}% | Auth: {item.get('AuthInfoDes', '未知')})"
+                }
+                for item in web_results
+            ]
+        else:
+            logger.error(f"search_volcengine error response: {r.text}")
+            raise Exception(f"Volcengine Custom Search returned status code {r.status_code}: {r.text}")
 
 # Helper functions for the Search Aggregator Gateway
 async def search_tavily(query: str, api_key: str) -> list[dict]:
@@ -305,7 +354,18 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     EXA_API_KEY = os.getenv("EXA_API_KEY")
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     GOOGLE_CX = os.getenv("GOOGLE_CX")
+    VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
     
+    # 0. If Chinese query and Volcengine is configured, prioritize it
+    if VOLC_SEARCH_API_KEY and is_chinese_query(query):
+        try:
+            logger.info("Attempting search via Volcengine (Chinese query)...")
+            results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
+            if results:
+                return results, "Volcengine"
+        except Exception as e:
+            logger.warning(f"Volcengine search failed: {e}. Falling back...")
+            
     # 1. Try Tavily
     if TAVILY_API_KEY:
         try:
@@ -332,6 +392,16 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
             return results, "Google"
         except Exception as e:
             logger.warning(f"Google Custom Search failed: {e}. Falling back...")
+            
+    # 3.5. Try Volcengine search fallback for non-Chinese queries
+    if VOLC_SEARCH_API_KEY:
+        try:
+            logger.info("Attempting search via Volcengine (Fallback)...")
+            results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
+            if results:
+                return results, "Volcengine"
+        except Exception as e:
+            logger.warning(f"Volcengine fallback search failed: {e}. Falling back...")
             
     # 4. Fallback to DuckDuckGo
     logger.info("Executing DuckDuckGo fallback raw search.")
@@ -382,11 +452,13 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     - **Language Strategy**: Use English keywords for technical, programming, or documentation searches. Use Chinese keywords for domestic news or local topics.
     - **Specific URL**: If you already have a target URL, use `crawl_page` directly instead of searching.
     - **No Hallucinations**: Only state facts found directly in the search snippets or crawled content.
+    - **Volcengine Search**: Prioritized for Chinese queries to fetch local, high-quality, authoritative results.
     
     Args:
         query: Core search keywords (e.g., "Python 3.12 syntax changes"). Avoid conversational questions.
-        engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Google", "Zhihu"). 
-                 Use "Zhihu" for Chinese forum opinions. Use "hybrid" or "all" to search general web and Zhihu in parallel. 
+        engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Google", "Zhihu", "Volcengine"). 
+                 Use "Zhihu" for Chinese forum opinions. Use "Volcengine" for domestic Chinese search.
+                 Use "hybrid" or "all" to search general web and Zhihu in parallel. 
                  Leave as null/None to use available defaults (highly recommended for general queries).
         page: Optional. Page number for pagination. Defaults to 1.
     """
@@ -437,10 +509,11 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         EXA_API_KEY = os.getenv("EXA_API_KEY")
         GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
         GOOGLE_CX = os.getenv("GOOGLE_CX")
+        VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
         
         forced_engine = None
         for eng in engines_list:
-            if eng in ["tavily", "exa", "google", "duckduckgo"]:
+            if eng in ["tavily", "exa", "google", "duckduckgo", "volcengine", "volc"]:
                 forced_engine = eng
                 break
                 
@@ -462,6 +535,12 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
                 engine_used = "Google"
             except Exception as e:
                 return f"Error: Forced Google search failed: {e}"
+        elif (forced_engine == "volcengine" or forced_engine == "volc") and VOLC_SEARCH_API_KEY:
+            try:
+                web_results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
+                engine_used = "Volcengine"
+            except Exception as e:
+                return f"Error: Forced Volcengine search failed: {e}"
         elif forced_engine == "duckduckgo":
             web_results = await search_duckduckgo_raw(query)
             engine_used = "DuckDuckGo"
