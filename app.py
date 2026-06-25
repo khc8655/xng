@@ -377,11 +377,10 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     
     CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
     - **Search First**: Use this tool to look up current events, programming APIs, documentation, or factual queries.
-    - **Formulate Clean Queries**: Do NOT search using full sentences, conversational phrases, or questions (e.g., avoid "how do I do x in y"). Use concise, space-separated keywords/nouns (e.g., "FastAPI CORS middleware configuration").
-    - **Evaluate Before Retrying**: Read the returned search snippets carefully. Frequently, the answer is already in the snippets, or they contain a direct documentation URL that you can crawl. 
-    - **Search Strategically (Avoid Loops)**: Formulate your queries carefully to get the best results in fewer attempts. If the initial search does not yield the required information, refine your keywords by adding specifics (such as version numbers, error codes, file types, or domain filters like `site:github.com`) rather than repeating the same search or entering endless search loops.
-    - **Language Strategy**: Use English keywords for technical, programming, or documentation searches to get the best sources. Use Chinese keywords for domestic topics or Chinese news.
-    - **Specific URL**: If you already have a target URL (from search results or user input), do NOT search. Use `crawl_page` directly to fetch the page content.
+    - **Formulate Clean Queries**: For best results, use concise, keyword-focused, space-separated terms (e.g., "FastAPI CORS middleware configuration") rather than conversational sentences or questions.
+    - **Evaluate Snippets**: Read the returned search snippets carefully; they often contain the answer directly, or point to a target URL that you can crawl.
+    - **Language Strategy**: Use English keywords for technical, programming, or documentation searches. Use Chinese keywords for domestic news or local topics.
+    - **Specific URL**: If you already have a target URL, use `crawl_page` directly instead of searching.
     - **No Hallucinations**: Only state facts found directly in the search snippets or crawled content.
     
     Args:
