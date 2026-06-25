@@ -56,8 +56,6 @@ def get_active_engines() -> str:
         engines.append("Tavily")
     if os.getenv("EXA_API_KEY"):
         engines.append("Exa")
-    if os.getenv("GOOGLE_API_KEY") and os.getenv("GOOGLE_CX"):
-        engines.append("Google")
     if os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY"):
         engines.append("Volcengine")
     engines.append("DuckDuckGo (Free)")
@@ -260,30 +258,7 @@ async def search_exa(query: str, api_key: str) -> list[dict]:
 
 
 
-async def search_google(query: str, api_key: str, cx: str) -> list[dict]:
-    url = "https://customsearch.googleapis.com/customsearch/v1"
-    params = {
-        "q": query,
-        "key": api_key,
-        "cx": cx,
-        "num": 10
-    }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.get(url, params=params)
-        if r.status_code == 200:
-            data = r.json()
-            items = data.get("items", [])
-            return [
-                {
-                    "title": item.get("title", "No Title"),
-                    "url": item.get("link", "#"),
-                    "snippet": item.get("snippet", "No description."),
-                    "engine": "Google"
-                }
-                for item in items
-            ]
-        else:
-            raise Exception(f"Google returned status code {r.status_code}")
+# Google search implementation has been removed.
 
 async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
     """
@@ -352,8 +327,6 @@ async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
 async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
     EXA_API_KEY = os.getenv("EXA_API_KEY")
-    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-    GOOGLE_CX = os.getenv("GOOGLE_CX")
     VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
     
     # 0. If Chinese query and Volcengine is configured, prioritize it
@@ -384,16 +357,7 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
         except Exception as e:
             logger.warning(f"Exa search failed: {e}. Falling back...")
             
-    # 3. Try Google
-    if GOOGLE_API_KEY and GOOGLE_CX:
-        try:
-            logger.info("Attempting search via Google Custom Search...")
-            results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
-            return results, "Google"
-        except Exception as e:
-            logger.warning(f"Google Custom Search failed: {e}. Falling back...")
-            
-    # 3.5. Try Volcengine search fallback for non-Chinese queries
+    # 3. Try Volcengine search fallback for non-Chinese queries
     if VOLC_SEARCH_API_KEY:
         try:
             logger.info("Attempting search via Volcengine (Fallback)...")
@@ -456,7 +420,7 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     
     Args:
         query: Core search keywords (e.g., "Python 3.12 syntax changes"). Avoid conversational questions.
-        engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Google", "Zhihu", "Volcengine"). 
+        engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Zhihu", "Volcengine"). 
                  Use "Zhihu" for Chinese forum opinions. Use "Volcengine" for domestic Chinese search.
                  Use "hybrid" or "all" to search general web and Zhihu in parallel. 
                  Leave as null/None to use available defaults (highly recommended for general queries).
@@ -507,13 +471,11 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     else:
         TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
         EXA_API_KEY = os.getenv("EXA_API_KEY")
-        GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
-        GOOGLE_CX = os.getenv("GOOGLE_CX")
         VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
         
         forced_engine = None
         for eng in engines_list:
-            if eng in ["tavily", "exa", "google", "duckduckgo", "volcengine", "volc"]:
+            if eng in ["tavily", "exa", "duckduckgo", "volcengine", "volc"]:
                 forced_engine = eng
                 break
                 
@@ -529,12 +491,6 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
                 engine_used = "Exa"
             except Exception as e:
                 return f"Error: Forced Exa search failed: {e}"
-        elif forced_engine == "google" and GOOGLE_API_KEY and GOOGLE_CX:
-            try:
-                web_results = await search_google(query, GOOGLE_API_KEY, GOOGLE_CX)
-                engine_used = "Google"
-            except Exception as e:
-                return f"Error: Forced Google search failed: {e}"
         elif (forced_engine == "volcengine" or forced_engine == "volc") and VOLC_SEARCH_API_KEY:
             try:
                 web_results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
