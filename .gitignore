@@ -1,7 +1,8 @@
 .venv/
 .venv311/
 __pycache__/
-wasmer/site-packages/
+wasmer/site-packages/*
+!wasmer/site-packages/.gitkeep
 test_site_packages/
 scratch/
 cf_snippet.js
