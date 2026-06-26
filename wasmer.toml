@@ -1,12 +1,12 @@
 [package]
-name = "xk/mcp-server"
+name = "kanghongcan/mcp-server"
 version = "0.1.3"
 description = "FastAPI MCP Search and Crawl Server"
 license = "MIT"
 entrypoint = "python"
 
 [dependencies]
-"python/python" = "3.12"
+"python/python" = "^3.12"
 
 [fs]
 "/" = "."

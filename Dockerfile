@@ -21,8 +21,8 @@ ENV HOME=/home/user \
 WORKDIR $HOME/app
 
 # Copy requirements and install
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-hf.txt .
+RUN pip install --no-cache-dir -r requirements-hf.txt
 
 # Install Playwright Chromium and system dependencies
 RUN playwright install chromium --with-deps

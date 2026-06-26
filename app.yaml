@@ -1,3 +1,5 @@
-kind: wasmer.io/App.v0
 name: mcp-server
+app_id: da_RbxI9tgUlyQr
+owner: kanghongcan
 package: .
+kind: wasmer.io/App.v0

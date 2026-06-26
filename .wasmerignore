@@ -1,0 +1,11 @@
+.venv/
+.venv311/
+__pycache__/
+.git/
+.github/
+scratch/
+cf_snippet.js
+raw_doc.html
+*.pyc
+*.pyo
+*.pyd
