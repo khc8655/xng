@@ -1,6 +1,6 @@
 [package]
 name = "kanghongcan/mcp-server"
-version = "0.1.4"
+version = "0.1.5"
 description = "FastAPI MCP Search and Crawl Server"
 license = "MIT"
 entrypoint = "python"
@@ -10,6 +10,7 @@ entrypoint = "python"
 
 [fs]
 "/" = "."
+"/site-packages" = "wasmer/site-packages"
 
 [[command]]
 name = "python"
