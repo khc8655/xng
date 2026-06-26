@@ -1,5 +1,26 @@
-name: mcp-server
+name: khcsearch
 app_id: da_RbxI9tgUlyQr
 owner: kanghongcan
 package: .
 kind: wasmer.io/App.v0
+annotations:
+  shipitcli.com/config:
+    asgi_application: app:app
+    commands: {}
+    cross_platform: wasix_wasm32
+    extra_dependencies:
+    - mcp[cli]
+    framework: mcp
+    install_requires_all_files: false
+    main_file: app.py
+    port: 8080
+    precompile_python: true
+    python_extra_index_url: https://pythonindex.wasix.org/simple
+    python_version: '3.13'
+    server: uvicorn
+    uses_ffmpeg: false
+    uses_pandoc: false
+    uv_version: 0.8.15
+  shipitcli.com/provider: python
+  shipitcli.com/version: 0.21.4
+  wasmer.io/app-kind: mcp
