@@ -413,19 +413,22 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     results = await search_duckduckgo_raw(query)
     return results, "DuckDuckGo"
 
-# 3. Define Zhihu search tool
 @mcp.tool()
 async def search_zhihu(query: str, count: int = 5) -> str:
     """
-    Search Zhihu (知乎) for Chinese Q&A, articles, opinions, and community discussions.
+    Search Zhihu (知乎) - the premier Chinese high-quality Q&A, technical articles, and knowledge sharing community.
     
-    CRITICAL INSTRUCTIONS FOR HIGH EFFICIENCY:
-    - Use this tool ONLY when seeking domestic Chinese community answers, developer experiences on Zhihu, or local opinions.
-    - Formulate your search query in Chinese for better results.
-    - Do NOT use this tool for general international programming questions, official documentation, or global news; use `search_web` instead.
+    CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
+    - **Troubleshooting & Debugging**: Zhihu is extremely valuable for solving coding errors, deployment bugs, or software configurations. It contains rich human-curated guides and troubleshooting steps that are often of much higher quality than spam/scraper search engine results.
+    - **When to Use**:
+      1. For ANY Chinese queries seeking how to solve a programming error, framework bug, or setup issue.
+      2. For comparisons or reviews of technical stacks, tools, cloud services (e.g. GCP, AWS, Cloudflare, Docker).
+      3. For developer experience sharing, coding tutorials, best practices, and architecture designs.
+      4. For domestic Chinese opinions, community consensus, industry trends, or localized knowledge.
+    - **Language Strategy**: Formulate your query in Chinese (e.g. "Cloudflare Worker 限制" or "FastAPI CORS 报错解决") to get the best curated community discussions.
     
     Args:
-        query: The search query string (prefer Chinese keywords).
+        query: The search query (must be key terms, preferably in Chinese).
         count: Optional. Number of search results to return. Defaults to 5.
     """
     try:
@@ -898,8 +901,28 @@ def convert_github_url_to_raw(url: str) -> str | None:
         
     return None
 
+async def crawl_firecrawl(url: str, api_key: str) -> str:
+    """Scrape webpage to clean Markdown using Firecrawl cloud API."""
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "url": url,
+        "formats": ["markdown"]
+    }
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers)
+        if resp.status_code != 200:
+            raise Exception(f"Firecrawl API returned status code {resp.status_code}: {resp.text}")
+        data = resp.json()
+        if not data.get("success"):
+            raise Exception(f"Firecrawl scrape failed: {data.get('error', 'Unknown error')}")
+        return data.get("data", {}).get("markdown", "")
+
 async def fetch_page_content(url: str) -> str:
     SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
+    FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
     
     # 1. Try local HTTP client with heuristic readability first
     logger.info(f"Attempting local HTTP crawl first: {url}")
@@ -946,9 +969,18 @@ async def fetch_page_content(url: str) -> str:
     else:
         logger.info("Local Crawl4AI is not initialized/available. Skipping local dynamic crawl.")
 
-    # 3. Failover to Scrapfly API if configured
+    # 3. Failover to Firecrawl API if configured
+    if FIRECRAWL_API_KEY:
+        logger.info(f"Local crawl paths failed/blocked. Failing over to Firecrawl API for: {url}")
+        try:
+            return await crawl_firecrawl(url, FIRECRAWL_API_KEY)
+        except Exception as e_firecrawl:
+            logger.error(f"Firecrawl failover failed: {str(e_firecrawl)}")
+            # Fall through to Scrapfly or others
+
+    # 4. Failover to Scrapfly API if configured
     if SCRAPFLY_API_KEY:
-        logger.info(f"Local crawl paths failed/blocked. Failing over to Scrapfly API for: {url}")
+        logger.info(f"Local crawl paths failed/blocked (or Firecrawl failed). Failing over to Scrapfly API for: {url}")
         try:
             return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
         except Exception as e_scrapfly:
@@ -960,7 +992,7 @@ async def fetch_page_content(url: str) -> str:
             if not local_failed and local_text:
                 logger.info("Returning partially blocked local text since Scrapfly also failed.")
                 return local_text
-            raise Exception(f"Crawl failed on all local methods and Scrapfly: {str(e_scrapfly)}")
+            raise Exception(f"Crawl failed on all local methods, Firecrawl, and Scrapfly: {str(e_scrapfly)}")
     else:
         logger.warning("Local crawl paths failed/blocked, and Scrapfly API key is not configured.")
         # Return best available local text
@@ -968,7 +1000,7 @@ async def fetch_page_content(url: str) -> str:
             return crawl4ai_text
         if not local_failed and local_text:
             return local_text
-        raise Exception("All local crawl methods failed/blocked, and no Scrapfly key configured for failover.")
+        raise Exception("All local crawl methods failed/blocked, and no Firecrawl/Scrapfly keys configured for failover.")
 
 
 def generate_markdown_outline(markdown_text: str) -> str:
@@ -1292,12 +1324,20 @@ async def dashboard(request: Request):
     active_engines = get_active_engines()
     
     # 3. Crawler engine description
+    c_engines = []
     if global_crawler is not None:
-        crawler_engine_html = '<span class="active-text"><i class="fa-solid fa-spider"></i> Playwright (Chromium)</span>'
+        c_engines.append("Playwright (Chromium)")
+    if os.getenv("FIRECRAWL_API_KEY"):
+        c_engines.append("Firecrawl (Cloud)")
+    if os.getenv("SCRAPFLY_API_KEY"):
+        c_engines.append("Scrapfly (Proxy)")
+        
+    if c_engines:
+        crawler_engine_html = f'<span class="active-text"><i class="fa-solid fa-spider"></i> {" + ".join(c_engines)}</span>'
     elif CRAWL4AI_AVAILABLE:
         crawler_engine_html = '<span class="inactive-text"><i class="fa-solid fa-spinner fa-spin"></i> 正在启动...</span>'
     else:
-        crawler_engine_html = '<span class="inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-microchip"></i> Heuristics + Scrapfly (轻量降级)</span>'
+        crawler_engine_html = '<span class="inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-microchip"></i> Heuristics (轻量降级)</span>'
 
     # 4. Generate copyable configs (token is masked for security, user must fill in full token)
     sse_config_str = (
