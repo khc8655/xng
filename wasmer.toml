@@ -1,6 +1,6 @@
 [package]
 name = "kanghongcan/mcp-server"
-version = "0.1.10"
+version = "0.1.11"
 description = "FastAPI MCP Search and Crawl Server"
 license = "MIT"
 entrypoint = "python"

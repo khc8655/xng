@@ -2,4 +2,8 @@ name: khcsearch
 app_id: da_2yGI9trUy7zL
 owner: kanghongcan
 package: .
+domains:
+- khcsearch.wasmer.app
 kind: wasmer.io/App.v0
+aliases:
+- khcsearch.wasmer.app

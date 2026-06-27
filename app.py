@@ -17,6 +17,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("mcp-server")
+# Suppress noisy MCP protocol handling log output (PingRequest/ListToolsRequest)
+logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 

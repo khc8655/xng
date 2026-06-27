@@ -1,0 +1,22 @@
+name: Deploy to Wasmer Edge
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Wasmer CLI
+        run: curl https://get.wasmer.io -sSfL | sh
+
+      - name: Deploy to Wasmer Edge
+        run: |
+          export PATH="$HOME/.wasmer/bin:$PATH"
+          wasmer deploy --token ${{ secrets.WASMER_TOKEN }} --non-interactive --bump
