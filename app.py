@@ -3,6 +3,7 @@ import asyncio
 import logging
 import re
 import time
+import json
 import subprocess
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -329,17 +330,55 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     EXA_API_KEY = os.getenv("EXA_API_KEY")
     VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
     
-    # 0. If Chinese query and Volcengine is configured, prioritize it
-    if VOLC_SEARCH_API_KEY and is_chinese_query(query):
-        try:
-            logger.info("Attempting search via Volcengine (Chinese query)...")
-            results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
-            if results:
-                return results, "Volcengine"
-        except Exception as e:
-            logger.warning(f"Volcengine search failed: {e}. Falling back...")
+    # 0. Chinese query: run Volcengine + Tavily in parallel for comprehensive coverage
+    #    Volcengine excels at domestic Chinese content (CSDN, 掘金, 知乎...)
+    #    Tavily excels at international/official docs (Google, Cloudflare, AWS...)
+    if is_chinese_query(query):
+        parallel_tasks = []
+        task_names = []
+        
+        if VOLC_SEARCH_API_KEY:
+            parallel_tasks.append(search_volcengine(query, VOLC_SEARCH_API_KEY))
+            task_names.append("Volcengine")
+        if TAVILY_API_KEY:
+            parallel_tasks.append(search_tavily(query, TAVILY_API_KEY))
+            task_names.append("Tavily")
+        
+        if len(parallel_tasks) >= 2:
+            # Both engines available: run in parallel, merge, deduplicate by URL
+            logger.info(f"Chinese query: running {' + '.join(task_names)} in parallel...")
+            gathered = await asyncio.gather(*parallel_tasks, return_exceptions=True)
             
-    # 1. Try Tavily
+            merged = []
+            seen_urls = set()
+            engines_hit = []
+            
+            for i, result in enumerate(gathered):
+                if isinstance(result, Exception):
+                    logger.warning(f"{task_names[i]} failed in parallel search: {result}")
+                    continue
+                if result:
+                    engines_hit.append(task_names[i])
+                    for r in result:
+                        url = r.get("url", "")
+                        if url and url not in seen_urls:
+                            seen_urls.add(url)
+                            merged.append(r)
+            
+            if merged:
+                return merged, " + ".join(engines_hit)
+            # Both failed, fall through to other engines
+            
+        elif len(parallel_tasks) == 1:
+            # Only one engine available for Chinese query
+            try:
+                results = await parallel_tasks[0]
+                if results:
+                    return results, task_names[0]
+            except Exception as e:
+                logger.warning(f"{task_names[0]} search failed: {e}. Falling back...")
+            
+    # 1. Try Tavily (for non-Chinese queries, or if parallel section above was skipped/failed)
     if TAVILY_API_KEY:
         try:
             logger.info("Attempting search via Tavily...")
@@ -357,7 +396,7 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
         except Exception as e:
             logger.warning(f"Exa search failed: {e}. Falling back...")
             
-    # 3. Try Volcengine search fallback for non-Chinese queries
+    # 3. Try Volcengine fallback for non-Chinese queries
     if VOLC_SEARCH_API_KEY:
         try:
             logger.info("Attempting search via Volcengine (Fallback)...")
@@ -1213,11 +1252,88 @@ async def api_stats():
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
     # Dynamic host detection for config helper (checking X-Forwarded-Host from proxy)
-    host = request.headers.get("x-forwarded-host", request.headers.get("host", "your-space-name.hf.space"))
+    host = request.headers.get("x-forwarded-host", request.headers.get("host", "khcsearch.wasmer.app"))
     proto = request.headers.get("x-forwarded-proto", "https")
     sse_url = f"{proto}://{host}/mcp/sse"
-    token_val = "YOUR_BEARER_TOKEN"
+    # Security: mask the token in the public dashboard to prevent leaking secrets
+    # Show only first 4 and last 2 chars, e.g. "KangH...n@"
+    if BEARER_TOKEN:
+        if len(BEARER_TOKEN) > 8:
+            token_val = BEARER_TOKEN[:5] + "..." + BEARER_TOKEN[-2:]
+        else:
+            token_val = BEARER_TOKEN[:2] + "..."
+    else:
+        token_val = "YOUR_BEARER_TOKEN"
     
+    # 1. Check BEARER_TOKEN and configure status indicators & banners
+    if BEARER_TOKEN:
+        auth_title = "已启用"
+        auth_status_html = '<span class="status-indicator active-text"><i class="fa-solid fa-shield-halved"></i> 已配置密钥</span>'
+        tip_banner_html = f"""
+        <div style="font-size: 0.825rem; color: var(--success-color); border: 1px solid rgba(16, 185, 129, 0.2); background: rgba(16, 185, 129, 0.05); padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <i class="fa-solid fa-circle-check"></i>
+            <span><strong>提示:</strong> 密钥已配置！出于安全考虑，配置中的 Token 已脱敏显示（<code>{token_val}</code>），请将其替换为您的完整密钥后再导入 Agent。</span>
+        </div>
+        """
+    else:
+        auth_title = "未启用"
+        auth_status_html = '<span class="status-indicator inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-triangle-exclamation"></i> 未配置密钥</span>'
+        tip_banner_html = f"""
+        <div style="font-size: 0.825rem; color: var(--warning-color); border: 1px solid rgba(245, 158, 11, 0.2); background: rgba(245, 158, 11, 0.05); padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+            <i class="fa-solid fa-triangle-exclamation"></i>
+            <span><strong>提示:</strong> 请将配置中的 <code>YOUR_BEARER_TOKEN</code> 替换为您在 Hugging Face Space 中配置的实际 <code>BEARER_TOKEN</code> 密钥。</span>
+        </div>
+        """
+
+    # 2. Get active engines
+    active_engines = get_active_engines()
+    
+    # 3. Crawler engine description
+    if global_crawler is not None:
+        crawler_engine_html = '<span class="active-text"><i class="fa-solid fa-spider"></i> Playwright (Chromium)</span>'
+    elif CRAWL4AI_AVAILABLE:
+        crawler_engine_html = '<span class="inactive-text"><i class="fa-solid fa-spinner fa-spin"></i> 正在启动...</span>'
+    else:
+        crawler_engine_html = '<span class="inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-microchip"></i> Heuristics + Scrapfly (轻量降级)</span>'
+
+    # 4. Generate copyable configs (token is masked for security, user must fill in full token)
+    sse_config_str = (
+        '{\n'
+        '  "mcpServers": {\n'
+        '    "hf-search-crawl-mcp": {\n'
+        '      "type": "sse",\n'
+        f'      "url": "{sse_url}?token={token_val}"\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
+    
+    hermes_config_str = (
+        'mcp_servers:\n'
+        '  hf-search-crawl-mcp:\n'
+        f'    url: "{sse_url}?token={token_val}"\n'
+        '    transport: sse'
+    )
+    
+    claude_code_cli = f'claude mcp add hf-search-crawl-mcp --transport http "{sse_url}?token={token_val}"'
+    claude_config_str = (
+        f'# 命令行添加 (推荐 - 复制并在终端运行):\n'
+        f'{claude_code_cli}\n\n'
+        f'# 或手动写入 ~/.claude.json 中的 mcpServers:\n'
+        '{\n'
+        '  "mcpServers": {\n'
+        '    "hf-search-crawl-mcp": {\n'
+        '      "type": "http",\n'
+        f'      "url": "{sse_url}?token={token_val}"\n'
+        '    }\n'
+        '  }\n'
+        '}'
+    )
+    
+    sse_config_js = json.dumps(sse_config_str)
+    hermes_config_js = json.dumps(hermes_config_str)
+    claude_config_js = json.dumps(claude_config_str)
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-CN">
@@ -1512,20 +1628,20 @@ async def dashboard(request: Request):
 
         <main>
             <div class="grid-stats">
-                <!-- System Status Card -->
+                <!-- Key Configuration Status Card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">系统运行状态</span>
-                        <i class="fa-solid fa-gauge-high card-icon"></i>
+                        <span class="card-title">密钥配置状态</span>
+                        <i class="fa-solid fa-key card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value" id="uptime">加载中...</div>
-                        <div class="card-desc">自本次启动以来的运行时间</div>
+                        <div class="card-value">{auth_title}</div>
+                        <div class="card-desc">系统密钥鉴权保护状态</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
                             <span>密钥鉴权</span>
-                            <span class="status-indicator" id="auth-status">...</span>
+                            {auth_status_html}
                         </li>
                     </ul>
                 </div>
@@ -1537,13 +1653,13 @@ async def dashboard(request: Request):
                         <i class="fa-solid fa-magnifying-glass card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value" id="search-count">0</div>
+                        <div class="card-value">{search_count}</div>
                         <div class="card-desc">本次会话累计执行的搜索次数</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
                             <span>活跃搜索引擎</span>
-                            <span id="active-engines" style="word-break: break-all; max-width: 170px; text-align: right;">加载中...</span>
+                            <span style="word-break: break-all; max-width: 170px; text-align: right;">{active_engines}</span>
                         </li>
                     </ul>
                 </div>
@@ -1551,17 +1667,17 @@ async def dashboard(request: Request):
                 <!-- Crawl4AI status card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">Crawl4AI 网页爬虫</span>
+                        <span class="card-title">CRAWL4AI 网页爬虫</span>
                         <i class="fa-solid fa-spider card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value" id="crawl-count">0</div>
+                        <div class="card-value">{crawl_count}</div>
                         <div class="card-desc">本次会话累计执行的网页抓取次数</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
                             <span>爬虫引擎</span>
-                            <span id="crawler-engine">加载中...</span>
+                            {crawler_engine_html}
                         </li>
                     </ul>
                 </div>
@@ -1572,18 +1688,15 @@ async def dashboard(request: Request):
                 <div class="config-header">
                     <span class="config-title"><i class="fa-solid fa-cog"></i> 客户端 Agent 连接配置配置助手</span>
                     <div style="display: flex; gap: 0.5rem;">
-                        <button class="tab-btn active" onclick="showTab('sse')">原生 SSE 直连 (推荐 - 零依赖)</button>
-                        <button class="tab-btn" onclick="showTab('node')">Node.js Stdio 桥接</button>
-                        <button class="tab-btn" onclick="showTab('python')">Python Stdio 桥接</button>
+                        <button class="tab-btn active" onclick="showTab('sse')">通用版本 (原生 SSE)</button>
+                        <button class="tab-btn" onclick="showTab('hermes')">Hermes 版本 (YAML)</button>
+                        <button class="tab-btn" onclick="showTab('claude')">Claude Code 版本 (CLI)</button>
                     </div>
                 </div>
                 <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 0.8rem;" id="config-desc">
-                    无痛直连！如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可，完全无需本地下载安装任何依赖：
+                    通用直连版本：如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可：
                 </p>
-                <div style="font-size: 0.825rem; color: var(--warning-color); border: 1px solid rgba(245, 158, 11, 0.2); background: rgba(245, 158, 11, 0.05); padding: 0.6rem 0.8rem; border-radius: 8px; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
-                    <i class="fa-solid fa-triangle-exclamation"></i>
-                    <span><strong>提示:</strong> 请将配置中的 <code>YOUR_BEARER_TOKEN</code> 替换为您在 Hugging Face Space 中配置的实际 <code>BEARER_TOKEN</code> 密钥。</span>
-                </div>
+                {tip_banner_html}
                 <div style="position: relative;">
                     <pre id="json-config" style="padding-top: 2.5rem; min-height: 180px;"></pre>
                     <button class="copy-btn" onclick="copyConfig()" style="position: absolute; right: 10px; top: 10px;"><i class="fa-solid fa-copy"></i> 复制配置</button>
@@ -1596,39 +1709,10 @@ async def dashboard(request: Request):
         </footer>
 
         <script>
-            // Config Templates
-            const sseConfig = `{{
-  "mcpServers": {{
-    "hf-search-crawl-mcp": {{
-      "type": "sse",
-      "url": "{sse_url}?token={token_val}"
-    }}
-  }}
-}}`;
-
-            const nodeConfig = `{{
-  "mcpServers": {{
-    "hf-search-crawl-mcp": {{
-      "command": "mcp-remote",
-      "args": [
-        "{sse_url}?token={token_val}"
-      ]
-    }}
-  }}
-}}`;
-
-            const pythonConfig = `{{
-  "mcpServers": {{
-    "hf-search-crawl-mcp": {{
-      "command": "python3",
-      "args": [
-        "-m",
-        "mcp.cli.client",
-        "{sse_url}?token={token_val}"
-      ]
-    }}
-  }}
-}}`;
+            // Config Templates injected from Python safely via json.dumps
+            const sseConfig = {sse_config_js};
+            const hermesConfig = {hermes_config_js};
+            const claudeConfig = {claude_config_js};
 
             let currentTab = 'sse';
 
@@ -1638,13 +1722,13 @@ async def dashboard(request: Request):
                 
                 if (currentTab === 'sse') {{
                     configPre.textContent = sseConfig;
-                    desc.innerHTML = '无痛直连！如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可，完全无需本地下载安装任何依赖：';
-                }} else if (currentTab === 'node') {{
-                    configPre.textContent = nodeConfig;
-                    desc.innerHTML = '对于仅支持 Stdio (标准输入输出) 的客户端（如 Claude Desktop），建议在本地全局安装桥接器：<code>npm install -g mcp-remote</code>，以极速运行，免去 npx 每次运行时在线检查的开销：';
+                    desc.innerHTML = '通用直连版本：如果您的 Agent 客户端（如 Cursor、ModelScope Agent Studio 等）原生支持 SSE 协议，直接填写以下配置即可：';
+                }} else if (currentTab === 'hermes') {{
+                    configPre.textContent = hermesConfig;
+                    desc.innerHTML = 'Hermes 客户端：请将以下配置写入到您的 <code>~/.hermes/config.yaml</code> 文件中：';
                 }} else {{
-                    configPre.textContent = pythonConfig;
-                    desc.innerHTML = '免 Node 环境！对于仅支持 Stdio 的客户端，您可在本地环境执行 <code>pip install mcp</code>，利用 Python SDK 自带的连接器快速桥接：';
+                    configPre.textContent = claudeConfig;
+                    desc.innerHTML = 'Claude Code 命令行客户端：复制并在您的终端中直接执行以下命令，或手动配置 <code>~/.claude.json</code>：';
                 }}
             }}
 
@@ -1656,50 +1740,13 @@ async def dashboard(request: Request):
                 
                 // Highlight active button
                 const btn = Array.from(document.querySelectorAll('.tab-btn')).find(b => {{
-                    if (tab === 'sse') return b.textContent.includes('原生');
-                    if (tab === 'node') return b.textContent.includes('Node');
-                    return b.textContent.includes('Python');
+                    if (tab === 'sse') return b.textContent.includes('通用');
+                    if (tab === 'hermes') return b.textContent.includes('Hermes');
+                    return b.textContent.includes('Claude');
                 }});
                 if (btn) btn.classList.add('active');
                 
                 updateConfigDisplay();
-            }}
-
-            async function fetchStats() {{
-                try {{
-                    const res = await fetch('/api/stats');
-                    if (!res.ok) return;
-                    const data = await res.json();
-                    
-                    // Update DOM
-                    document.getElementById('uptime').textContent = data.uptime;
-                    document.getElementById('search-count').textContent = data.stats.searches;
-                    document.getElementById('crawl-count').textContent = data.stats.crawls;
-                    document.getElementById('active-engines').textContent = data.active_engines;
-                    
-                    // Auth indicator
-                    const authIndicator = document.getElementById('auth-status');
-                    if (data.auth_enabled) {{
-                        authIndicator.innerHTML = '<span class="active-text"><i class="fa-solid fa-shield-halved"></i> 已启用</span>';
-                    }} else {{
-                        authIndicator.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-triangle-exclamation"></i> 未启用</span>';
-                    }}
-                    
-                    // Crawler Engine indicator
-                    const crawlerEngine = document.getElementById('crawler-engine');
-                    if (crawlerEngine) {{
-                        if (data.crawl4ai_active) {{
-                            crawlerEngine.innerHTML = '<span class="active-text"><i class="fa-solid fa-spider"></i> Playwright (Chromium)</span>';
-                        }} else if (data.crawl4ai_available) {{
-                            crawlerEngine.innerHTML = '<span class="inactive-text"><i class="fa-solid fa-spinner fa-spin"></i> 正在启动...</span>';
-                        }} else {{
-                            crawlerEngine.innerHTML = '<span class="inactive-text" style="color: var(--warning-color);"><i class="fa-solid fa-microchip"></i> Heuristics + Scrapfly (轻量降级)</span>';
-                        }}
-                    }}
-                    
-                }} catch (e) {{
-                    console.error("Failed fetching statistics", e);
-                }}
             }}
 
             function copyConfig() {{
@@ -1716,10 +1763,8 @@ async def dashboard(request: Request):
                 }});
             }}
 
-            // Initial display and poll every 3 seconds
+            // Initial display - NO background polling to allow Wasmer scale-to-zero sleep/hibernation
             updateConfigDisplay();
-            fetchStats();
-            setInterval(fetchStats, 3000);
         </script>
     </body>
     </html>
