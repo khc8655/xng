@@ -1120,20 +1120,29 @@ async def crawl_page(url: str, query: str | None = None) -> str:
     return markdown_text
 
 def extract_markdown_links(markdown_text: str, current_url: str) -> list[str]:
+    """Extract unique absolute HTTP(S) links from Markdown text, excluding images and static assets."""
     import urllib.parse
-    matches = re.findall(r'\[[^\]]*\]\(([^)]+)\)', markdown_text)
-    resolved = []
+    # Match [text](url) but NOT ![alt](url) — use negative lookbehind for '!'
+    matches = re.findall(r'(?<!!)\[[^\]]*\]\(([^)\s]+)\)', markdown_text)
+    resolved = set()
+    # Common static file extensions to exclude
+    static_exts = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.css', '.js', '.pdf', '.zip', '.tar', '.gz', '.mp4', '.mp3', '.woff', '.woff2', '.ttf', '.eot'}
     for link in matches:
         link_clean = link.split("#")[0].split("?")[0].strip()
-        if not link_clean:
+        if not link_clean or len(link_clean) > 500:
             continue
         abs_url = urllib.parse.urljoin(current_url, link_clean)
-        if abs_url.startswith("http://") or abs_url.startswith("https://"):
-            resolved.append(abs_url)
-    return list(set(resolved))
+        if not (abs_url.startswith("http://") or abs_url.startswith("https://")):
+            continue
+        # Skip static asset URLs
+        parsed_path = urllib.parse.urlparse(abs_url).path.lower()
+        if any(parsed_path.endswith(ext) for ext in static_exts):
+            continue
+        resolved.add(abs_url)
+    return list(resolved)
 
 @mcp.tool()
-async def crawl_site(start_url: str, max_pages: int = 10, prefix_filter: str | None = None) -> str:
+async def crawl_site(start_url: str, max_pages: int = 10, max_depth: int = 2, prefix_filter: str | None = None) -> str:
     """
     Recursively crawl a specific documentation section or chapter of a website starting from a URL.
     This fetches multiple sibling and child pages under the same directory prefix to gather complete context.
@@ -1142,19 +1151,23 @@ async def crawl_site(start_url: str, max_pages: int = 10, prefix_filter: str | N
     - **Use for Complete Documentation Chapters**: Use this tool when you need to understand an entire section of a guide or API doc (e.g. all guides under '/edge/' or '/docs/'), rather than just reading one page.
     - **Identify Section Structure**: Great for crawling API references, tutorial chapters, user guides, or site wikis.
     - **Scope Control**: By default, it automatically restricts crawling to links that share the parent folder path of the start_url.
-    - **Avoid Context Overload**: Limits to 10 pages by default. Do not request more than 25 pages to avoid blowing up the LLM's context window.
+    - **Depth Control**: max_depth controls how many link-hops deep the crawler goes (0 = start page only, 1 = start page + direct links, 2 = two hops). Keep this small to avoid crawling the entire site.
+    - **Avoid Context Overload**: Limits to 10 pages and depth 2 by default. Do not request more than 25 pages or depth 5.
     
     Args:
         start_url: The starting URL (e.g. 'https://docs.wasmer.io/edge/deploy').
         max_pages: Optional. The maximum number of pages to crawl (default 10, max 25).
+        max_depth: Optional. The maximum link-hop depth from the start page (default 2, max 5). 0 means only the start page itself.
         prefix_filter: Optional. Override the prefix URL. Only links starting with this URL will be crawled. If null, automatically uses the parent folder of the start_url.
     """
     import urllib.parse
+    global crawl_count
     
     if not (start_url.startswith("http://") or start_url.startswith("https://")):
         return "Error: Start URL must start with http:// or https://"
         
-    max_pages = min(max_pages, 25)
+    max_pages = min(max(max_pages, 1), 25)
+    max_depth = min(max(max_depth, 0), 5)
     
     # Determine directory prefix to restrict the crawl to the same chapter
     if not prefix_filter:
@@ -1166,44 +1179,78 @@ async def crawl_site(start_url: str, max_pages: int = 10, prefix_filter: str | N
             prefix_path = "/"
         prefix_filter = f"{parsed_start.scheme}://{parsed_start.netloc}{prefix_path}"
         
-    logger.info(f"Starting documentation crawl. Start URL: {start_url}, Prefix filter: {prefix_filter}, Max pages: {max_pages}")
+    logger.info(f"Starting documentation crawl. Start URL: {start_url}, Prefix: {prefix_filter}, Max pages: {max_pages}, Max depth: {max_depth}")
     
-    visited = {}  # url -> markdown content
-    to_visit = [start_url]
+    visited = {}       # url -> markdown content
+    url_depth = {}      # url -> depth level
+    to_visit = [(start_url, 0)]  # (url, depth) tuples
     
     while to_visit and len(visited) < max_pages:
-        # Fetch next batch of pages concurrently
+        # Take next batch from the queue (up to remaining capacity)
         batch = to_visit[:max_pages - len(visited)]
         to_visit = to_visit[len(batch):]
         
-        logger.info(f"Crawling batch of {len(batch)} pages...")
+        batch_urls = [url for url, _ in batch]
+        batch_depths = {url: depth for url, depth in batch}
         
-        # Concurrent fetching using fetch_page_content
-        tasks = [fetch_page_content(url) for url in batch]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"Crawling batch of {len(batch_urls)} pages (depths: {[d for _, d in batch]})...")
         
-        new_links = []
-        for url, result in zip(batch, results):
-            if isinstance(result, Exception):
-                logger.error(f"Error fetching {url}: {result}")
-                visited[url] = f"Error fetching page: {str(result)}"
-                continue
-                
-            visited[url] = result
+        # Check cache first, fetch uncached pages concurrently
+        fetch_tasks = {}
+        for url in batch_urls:
+            cached = crawl_cache.get(url)
+            if cached:
+                visited[url] = cached
+                url_depth[url] = batch_depths[url]
+                crawl_count += 1
+            else:
+                fetch_tasks[url] = fetch_page_content(url)
+        
+        if fetch_tasks:
+            task_urls = list(fetch_tasks.keys())
+            results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
             
-            # Extract links from the fetched Markdown
-            extracted = extract_markdown_links(result, url)
-            for link in extracted:
-                if link.startswith(prefix_filter) and link not in visited and link not in to_visit and link not in new_links:
-                    new_links.append(link)
+            for url, result in zip(task_urls, results):
+                crawl_count += 1
+                depth = batch_depths[url]
+                if isinstance(result, Exception):
+                    logger.error(f"Error fetching {url} (depth {depth}): {result}")
+                    visited[url] = f"Error fetching page: {str(result)}"
+                    url_depth[url] = depth
+                    continue
                     
-        # Append new links to queue
+                visited[url] = result
+                url_depth[url] = depth
+                crawl_cache.set(url, result)
+        
+        # Extract links only from pages whose depth < max_depth
+        new_links = []  # list of (link, depth) tuples
+        for url in batch_urls:
+            depth = batch_depths[url]
+            if depth >= max_depth:
+                continue  # Do not extract links beyond max depth
+            content = visited.get(url, "")
+            if content.startswith("Error fetching"):
+                continue
+            extracted = extract_markdown_links(content, url)
+            queued_urls = {u for u, _ in to_visit}
+            seen_in_new = {u for u, _ in new_links}
+            for link in extracted:
+                if link.startswith(prefix_filter) and link not in visited and link not in queued_urls and link not in seen_in_new:
+                    new_links.append((link, depth + 1))
+                    
+        # Append new links with their correct depth to queue
         to_visit.extend(new_links)
         
     # Format the crawled pages
+    total = len(visited)
     formatted = []
     for idx, (url, content) in enumerate(visited.items(), 1):
-        formatted.append(f"## Page {idx}: {url}\n\n{content}")
+        depth = url_depth.get(url, 0)
+        # Truncate very long individual pages to prevent context explosion
+        if len(content) > 15000:
+            content = content[:15000] + f"\n\n... (truncated, {len(content)} chars total)"
+        formatted.append(f"## Page {idx}/{total} (depth {depth}): {url}\n\n{content}")
         
     return "\n\n---\n\n".join(formatted)
 
