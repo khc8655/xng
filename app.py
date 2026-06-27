@@ -1320,8 +1320,16 @@ async def dashboard(request: Request):
         </div>
         """
 
-    # 2. Get active engines
-    active_engines = get_active_engines()
+    # 2. Render active engines list in HTML (configured in green, fallback in gray)
+    engines_list = []
+    if os.getenv("TAVILY_API_KEY"):
+        engines_list.append('<span class="active-text">Tavily</span>')
+    if os.getenv("EXA_API_KEY"):
+        engines_list.append('<span class="active-text">Exa</span>')
+    if os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY"):
+        engines_list.append('<span class="active-text">Volcengine</span>')
+    engines_list.append('<span style="color: var(--text-muted);">DuckDuckGo (Free)</span>')
+    search_engines_html = ", ".join(engines_list)
     
     # 3. Crawler engine description
     c_engines = []
@@ -1702,7 +1710,7 @@ async def dashboard(request: Request):
                     <ul class="card-details-list">
                         <li>
                             <span>活跃搜索引擎</span>
-                            <span style="word-break: break-all; max-width: 170px; text-align: right;">{active_engines}</span>
+                            <span style="word-break: break-all; max-width: 170px; text-align: right;">{search_engines_html}</span>
                         </li>
                     </ul>
                 </div>
