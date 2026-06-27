@@ -1119,6 +1119,94 @@ async def crawl_page(url: str, query: str | None = None) -> str:
         
     return markdown_text
 
+def extract_markdown_links(markdown_text: str, current_url: str) -> list[str]:
+    import urllib.parse
+    matches = re.findall(r'\[[^\]]*\]\(([^)]+)\)', markdown_text)
+    resolved = []
+    for link in matches:
+        link_clean = link.split("#")[0].split("?")[0].strip()
+        if not link_clean:
+            continue
+        abs_url = urllib.parse.urljoin(current_url, link_clean)
+        if abs_url.startswith("http://") or abs_url.startswith("https://"):
+            resolved.append(abs_url)
+    return list(set(resolved))
+
+@mcp.tool()
+async def crawl_site(start_url: str, max_pages: int = 10, prefix_filter: str | None = None) -> str:
+    """
+    Recursively crawl a specific documentation section or chapter of a website starting from a URL.
+    This fetches multiple sibling and child pages under the same directory prefix to gather complete context.
+    
+    CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
+    - **Use for Complete Documentation Chapters**: Use this tool when you need to understand an entire section of a guide or API doc (e.g. all guides under '/edge/' or '/docs/'), rather than just reading one page.
+    - **Identify Section Structure**: Great for crawling API references, tutorial chapters, user guides, or site wikis.
+    - **Scope Control**: By default, it automatically restricts crawling to links that share the parent folder path of the start_url.
+    - **Avoid Context Overload**: Limits to 10 pages by default. Do not request more than 25 pages to avoid blowing up the LLM's context window.
+    
+    Args:
+        start_url: The starting URL (e.g. 'https://docs.wasmer.io/edge/deploy').
+        max_pages: Optional. The maximum number of pages to crawl (default 10, max 25).
+        prefix_filter: Optional. Override the prefix URL. Only links starting with this URL will be crawled. If null, automatically uses the parent folder of the start_url.
+    """
+    import urllib.parse
+    
+    if not (start_url.startswith("http://") or start_url.startswith("https://")):
+        return "Error: Start URL must start with http:// or https://"
+        
+    max_pages = min(max_pages, 25)
+    
+    # Determine directory prefix to restrict the crawl to the same chapter
+    if not prefix_filter:
+        parsed_start = urllib.parse.urlparse(start_url)
+        start_path = parsed_start.path.rstrip("/")
+        if "/" in start_path:
+            prefix_path = "/".join(start_path.split("/")[:-1]) + "/"
+        else:
+            prefix_path = "/"
+        prefix_filter = f"{parsed_start.scheme}://{parsed_start.netloc}{prefix_path}"
+        
+    logger.info(f"Starting documentation crawl. Start URL: {start_url}, Prefix filter: {prefix_filter}, Max pages: {max_pages}")
+    
+    visited = {}  # url -> markdown content
+    to_visit = [start_url]
+    
+    while to_visit and len(visited) < max_pages:
+        # Fetch next batch of pages concurrently
+        batch = to_visit[:max_pages - len(visited)]
+        to_visit = to_visit[len(batch):]
+        
+        logger.info(f"Crawling batch of {len(batch)} pages...")
+        
+        # Concurrent fetching using fetch_page_content
+        tasks = [fetch_page_content(url) for url in batch]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        new_links = []
+        for url, result in zip(batch, results):
+            if isinstance(result, Exception):
+                logger.error(f"Error fetching {url}: {result}")
+                visited[url] = f"Error fetching page: {str(result)}"
+                continue
+                
+            visited[url] = result
+            
+            # Extract links from the fetched Markdown
+            extracted = extract_markdown_links(result, url)
+            for link in extracted:
+                if link.startswith(prefix_filter) and link not in visited and link not in to_visit and link not in new_links:
+                    new_links.append(link)
+                    
+        # Append new links to queue
+        to_visit.extend(new_links)
+        
+    # Format the crawled pages
+    formatted = []
+    for idx, (url, content) in enumerate(visited.items(), 1):
+        formatted.append(f"## Page {idx}: {url}\n\n{content}")
+        
+    return "\n\n---\n\n".join(formatted)
+
 # Uptime text generator
 def get_uptime() -> str:
     uptime_seconds = int(time.time() - start_time)
