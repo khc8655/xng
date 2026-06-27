@@ -1253,6 +1253,7 @@ async def api_stats():
 # Premium HTML Dashboard UI
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(request: Request):
+    server_start_time = start_time
     # Dynamic host detection for config helper (checking X-Forwarded-Host from proxy)
     host = request.headers.get("x-forwarded-host", request.headers.get("host", "khcsearch.wasmer.app"))
     proto = request.headers.get("x-forwarded-proto", "https")
@@ -1630,15 +1631,15 @@ async def dashboard(request: Request):
 
         <main>
             <div class="grid-stats">
-                <!-- Key Configuration Status Card -->
+                <!-- System Status Card -->
                 <div class="card">
                     <div class="card-header">
-                        <span class="card-title">密钥配置状态</span>
-                        <i class="fa-solid fa-key card-icon"></i>
+                        <span class="card-title">系统运行状态</span>
+                        <i class="fa-solid fa-gauge-high card-icon"></i>
                     </div>
                     <div>
-                        <div class="card-value">{auth_title}</div>
-                        <div class="card-desc">系统密钥鉴权保护状态</div>
+                        <div class="card-value" id="uptime">计算中...</div>
+                        <div class="card-desc">自本次启动以来的运行时间</div>
                     </div>
                     <ul class="card-details-list">
                         <li>
@@ -1764,6 +1765,30 @@ async def dashboard(request: Request):
                     alert("复制失败: " + err);
                 }});
             }}
+
+            // Client-side ticking uptime based on server start time (zero network requests)
+            const serverStartTime = {server_start_time} * 1000;
+
+            function updateUptime() {{
+                const diffMs = Date.now() - serverStartTime;
+                const diffSecs = Math.max(0, Math.floor(diffMs / 1000));
+                
+                const days = Math.floor(diffSecs / 86400);
+                const hours = Math.floor((diffSecs % 86400) / 3600);
+                const minutes = Math.floor((diffSecs % 3600) / 60);
+                const seconds = diffSecs % 60;
+                
+                let uptimeStr = "";
+                if (days > 0) uptimeStr += days + "天 ";
+                if (hours > 0 || days > 0) uptimeStr += hours + "小时 ";
+                if (minutes > 0 || hours > 0 || days > 0) uptimeStr += minutes + "分 ";
+                uptimeStr += seconds + "秒";
+                
+                document.getElementById('uptime').textContent = uptimeStr;
+            }}
+
+            updateUptime();
+            setInterval(updateUptime, 1000);
 
             // Initial display - NO background polling to allow Wasmer scale-to-zero sleep/hibernation
             updateConfigDisplay();
