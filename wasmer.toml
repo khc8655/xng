@@ -1,6 +1,6 @@
 [package]
 name = "kanghongcan/mcp-server"
-version = "0.1.5"
+version = "0.1.7"
 description = "FastAPI MCP Search and Crawl Server"
 license = "MIT"
 entrypoint = "python"
@@ -18,5 +18,5 @@ module = "python/python:python"
 runner = "wasi"
 
 [command.annotations.wasi]
-main-args = ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "80"]
+main-args = ["-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]
 env = ["PYTHONPATH=/site-packages"]
