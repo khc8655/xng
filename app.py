@@ -22,6 +22,14 @@ logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 
+# Cache environment variables at startup to avoid repeated os.getenv calls
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+EXA_API_KEY = os.getenv("EXA_API_KEY")
+VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
+ZHIHU_SECRET = os.getenv("ZHIHU_ACCESS_SECRET") or os.getenv("ZHIHU_API_KEY")
+SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
+FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
+
 # Optional import for crawl4ai
 try:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
@@ -32,6 +40,15 @@ except ImportError:
 
 # Global crawler instance
 global_crawler = None
+
+# Semaphore to limit concurrent Playwright browser renders (prevents OOM)
+_browser_semaphore = asyncio.Semaphore(1)
+
+# Semaphore to limit concurrent crawl requests (prevents target rate-limiting)
+_crawl_semaphore = asyncio.Semaphore(3)
+
+# Global httpx client with connection pooling (reused across all requests)
+http_client: httpx.AsyncClient | None = None
 
 # Auto-detect memory limits to prevent container OOM crashes on low-resource environments like DCD
 if CRAWL4AI_AVAILABLE:
@@ -55,11 +72,11 @@ if CRAWL4AI_AVAILABLE:
 
 def get_active_engines() -> str:
     engines = []
-    if os.getenv("TAVILY_API_KEY"):
+    if TAVILY_API_KEY:
         engines.append("Tavily")
-    if os.getenv("EXA_API_KEY"):
+    if EXA_API_KEY:
         engines.append("Exa")
-    if os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY"):
+    if VOLC_SEARCH_API_KEY:
         engines.append("Volcengine")
     engines.append("DuckDuckGo (Free)")
     return ", ".join(engines)
@@ -69,26 +86,52 @@ search_count = 0
 crawl_count = 0
 start_time = time.time()
 
-# 0. Lightweight TTL Cache class
+# 0. TTL Cache with LRU eviction and max size limit
 class TTLCache:
-    def __init__(self, ttl_seconds: int = 600):
+    def __init__(self, ttl_seconds: int = 600, maxsize: int = 500):
         self.ttl = ttl_seconds
+        self.maxsize = maxsize
         self.cache = {}
-        
+        self._order = []
+
+    def _evict_expired(self):
+        now = time.time()
+        expired = [k for k, (_, ts) in self.cache.items() if now - ts >= self.ttl]
+        for k in expired:
+            del self.cache[k]
+            if k in self._order:
+                self._order.remove(k)
+
     def get(self, key):
         if key in self.cache:
             val, timestamp = self.cache[key]
             if time.time() - timestamp < self.ttl:
+                if key in self._order:
+                    self._order.remove(key)
+                self._order.append(key)
                 return val
             else:
                 del self.cache[key]
+                if key in self._order:
+                    self._order.remove(key)
         return None
-        
-    def set(self, key, val):
-        self.cache[key] = (val, time.time())
 
-search_cache = TTLCache(ttl_seconds=1800)
-crawl_cache = TTLCache(ttl_seconds=1800)
+    def set(self, key, val):
+        if key in self.cache:
+            if key in self._order:
+                self._order.remove(key)
+            self._order.append(key)
+            self.cache[key] = (val, time.time())
+            return
+        self._evict_expired()
+        while len(self.cache) >= self.maxsize and self._order:
+            oldest = self._order.pop(0)
+            self.cache.pop(oldest, None)
+        self.cache[key] = (val, time.time())
+        self._order.append(key)
+
+search_cache = TTLCache(ttl_seconds=1800, maxsize=300)
+crawl_cache = TTLCache(ttl_seconds=1800, maxsize=150)
 
 # 1. Initialize FastMCP with DNS rebinding protection disabled for cloud/proxy deployments
 mcp = FastMCP(
@@ -108,51 +151,51 @@ async def search_duckduckgo_raw(query: str) -> list[dict]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
     }
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            res = await client.post(url, data=params, headers=headers)
-            if res.status_code != 200:
-                return []
+        client = http_client or httpx.AsyncClient(timeout=10.0)
+        res = await client.post(url, data=params, headers=headers)
+        if res.status_code != 200:
+            return []
+            
+        soup = BeautifulSoup(res.text, "lxml")
+        results = soup.select(".result")
+        if not results:
+            return []
+            
+        organic_results = []
+        for result in results:
+            classes = result.get("class", [])
+            if "result--ad" in classes:
+                continue
                 
-            soup = BeautifulSoup(res.text, "html.parser")
-            results = soup.select(".result")
-            if not results:
-                return []
+            title_el = result.select_one(".result__title")
+            a_el = result.select_one(".result__a")
+            snippet_el = result.select_one(".result__snippet")
+            
+            if title_el and a_el:
+                title = title_el.text.strip()
+                raw_link = a_el["href"]
+                snippet = snippet_el.text.strip() if snippet_el else "No description."
                 
-            organic_results = []
-            for result in results:
-                classes = result.get("class", [])
-                if "result--ad" in classes:
+                if "y.js?" in raw_link or "ad_provider" in raw_link:
                     continue
                     
-                title_el = result.select_one(".result__title")
-                a_el = result.select_one(".result__a")
-                snippet_el = result.select_one(".result__snippet")
-                
-                if title_el and a_el:
-                    title = title_el.text.strip()
-                    raw_link = a_el["href"]
-                    snippet = snippet_el.text.strip() if snippet_el else "No description."
+                parsed_link = urllib.parse.urlparse(raw_link)
+                query_params = urllib.parse.parse_qs(parsed_link.query)
+                link = raw_link
+                if "uddg" in query_params:
+                    link = query_params["uddg"][0]
+                elif raw_link.startswith("//"):
+                    link = "https:" + raw_link
                     
-                    if "y.js?" in raw_link or "ad_provider" in raw_link:
-                        continue
-                        
-                    parsed_link = urllib.parse.urlparse(raw_link)
-                    query_params = urllib.parse.parse_qs(parsed_link.query)
-                    link = raw_link
-                    if "uddg" in query_params:
-                        link = query_params["uddg"][0]
-                    elif raw_link.startswith("//"):
-                        link = "https:" + raw_link
-                        
-                    organic_results.append({
-                        "title": title,
-                        "url": link,
-                        "snippet": snippet,
-                        "engine": "DuckDuckGo"
-                    })
-                    if len(organic_results) >= 10:
-                        break
-            return organic_results
+                organic_results.append({
+                    "title": title,
+                    "url": link,
+                    "snippet": snippet,
+                    "engine": "DuckDuckGo"
+                })
+                if len(organic_results) >= 10:
+                    break
+        return organic_results
     except Exception as e:
         logger.error(f"Error executing raw DuckDuckGo search: {str(e)}")
         return []
@@ -179,30 +222,30 @@ async def search_volcengine(query: str, api_key: str) -> list[dict]:
         "NeedSummary": True
     }
     logger.info(f"search_volcengine API call: Query='{query}', Key='{api_key[:4]}...{api_key[-4:]}'")
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(url, json=payload, headers=headers)
-        logger.info(f"search_volcengine API response status: {r.status_code}")
-        if r.status_code == 200:
-            data = r.json()
-            logger.info(f"search_volcengine response keys: {list(data.keys())}")
-            result = data.get("Result", {})
-            if not result:
-                logger.warning("search_volcengine: 'Result' is empty or null")
-                return []
-            web_results = result.get("WebResults", [])
-            logger.info(f"search_volcengine: WebResults count = {len(web_results)}")
-            return [
-                {
-                    "title": item.get("Title", "No Title"),
-                    "url": item.get("Url", "#"),
-                    "snippet": item.get("Summary") or item.get("Snippet") or "No description.",
-                    "engine": f"Volcengine (Relevance: {item.get('RankScore', 0.0) * 100:.1f}% | Auth: {item.get('AuthInfoDes', '未知')})"
-                }
-                for item in web_results
-            ]
-        else:
-            logger.error(f"search_volcengine error response: {r.text}")
-            raise Exception(f"Volcengine Custom Search returned status code {r.status_code}: {r.text}")
+    client = http_client or httpx.AsyncClient(timeout=10.0)
+    r = await client.post(url, json=payload, headers=headers)
+    logger.info(f"search_volcengine API response status: {r.status_code}")
+    if r.status_code == 200:
+        data = r.json()
+        logger.info(f"search_volcengine response keys: {list(data.keys())}")
+        result = data.get("Result", {})
+        if not result:
+            logger.warning("search_volcengine: 'Result' is empty or null")
+            return []
+        web_results = result.get("WebResults", [])
+        logger.info(f"search_volcengine: WebResults count = {len(web_results)}")
+        return [
+            {
+                "title": item.get("Title", "No Title"),
+                "url": item.get("Url", "#"),
+                "snippet": item.get("Summary") or item.get("Snippet") or "No description.",
+                "engine": f"Volcengine (Relevance: {item.get('RankScore', 0.0) * 100:.1f}% | Auth: {item.get('AuthInfoDes', '未知')})"
+            }
+            for item in web_results
+        ]
+    else:
+        logger.error(f"search_volcengine error response: {r.text}")
+        raise Exception(f"Volcengine Custom Search returned status code {r.status_code}: {r.text}")
 
 # Helper functions for the Search Aggregator Gateway
 async def search_tavily(query: str, api_key: str) -> list[dict]:
@@ -212,21 +255,21 @@ async def search_tavily(query: str, api_key: str) -> list[dict]:
         "query": query,
         "max_results": 10
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(url, json=payload)
-        if r.status_code == 200:
-            data = r.json()
-            return [
-                {
-                    "title": item.get("title", "No Title"),
-                    "url": item.get("url", "#"),
-                    "snippet": item.get("content", "No description."),
-                    "engine": "Tavily"
-                }
-                for item in data.get("results", [])
-            ]
-        else:
-            raise Exception(f"Tavily returned status code {r.status_code}")
+    client = http_client or httpx.AsyncClient(timeout=10.0)
+    r = await client.post(url, json=payload)
+    if r.status_code == 200:
+        data = r.json()
+        return [
+            {
+                "title": item.get("title", "No Title"),
+                "url": item.get("url", "#"),
+                "snippet": item.get("content", "No description."),
+                "engine": "Tavily"
+            }
+            for item in data.get("results", [])
+        ]
+    else:
+        raise Exception(f"Tavily returned status code {r.status_code}")
 
 async def search_exa(query: str, api_key: str) -> list[dict]:
     url = "https://api.exa.ai/search"
@@ -243,20 +286,20 @@ async def search_exa(query: str, api_key: str) -> list[dict]:
             }
         }
     }
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        r = await client.post(url, json=payload, headers=headers)
-        if r.status_code == 200:
-            data = r.json()
-            return [
-                {
-                    "title": item.get("title") or "No Title",
-                    "url": item.get("url", "#"),
-                    "snippet": (item.get("text", "")[:350] + "...") if item.get("text") else "No description.",
-                    "engine": "Exa"
-                }
-                for item in data.get("results", [])
-            ]
-        else:
+    client = http_client or httpx.AsyncClient(timeout=10.0)
+    r = await client.post(url, json=payload, headers=headers)
+    if r.status_code == 200:
+        data = r.json()
+        return [
+            {
+                "title": item.get("title") or "No Title",
+                "url": item.get("url", "#"),
+                "snippet": (item.get("text", "")[:350] + "...") if item.get("text") else "No description.",
+                "engine": "Exa"
+            }
+            for item in data.get("results", [])
+        ]
+    else:
             raise Exception(f"Exa returned status code {r.status_code}")
 
 
@@ -267,7 +310,7 @@ async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
     """
     Search Zhihu content using the official developer API.
     """
-    secret = os.getenv("ZHIHU_ACCESS_SECRET") or os.getenv("ZHIHU_API_KEY")
+    secret = ZHIHU_SECRET
     if not secret:
         logger.warning("Zhihu Access Secret (ZHIHU_ACCESS_SECRET/ZHIHU_API_KEY) is not configured.")
         return []
@@ -301,37 +344,34 @@ async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
             verify_opt = False
             
     try:
-        async with httpx.AsyncClient(timeout=15.0, verify=verify_opt) as client:
-            logger.info(f"Attempting search via Zhihu API for query: {query}")
-            r = await client.get(endpoint, params=params, headers=headers)
-            if r.status_code != 200:
-                logger.error(f"Zhihu API failed with status {r.status_code}: {r.text}")
-                return []
-                
-            resp_data = r.json()
-            data = resp_data.get("Data") if isinstance(resp_data.get("Data"), dict) else {}
-            items = data.get("Items") if isinstance(data.get("Items"), list) else []
+        client = http_client or httpx.AsyncClient(timeout=15.0, verify=verify_opt)
+        logger.info(f"Attempting search via Zhihu API for query: {query}")
+        r = await client.get(endpoint, params=params, headers=headers)
+        if r.status_code != 200:
+            logger.error(f"Zhihu API failed with status {r.status_code}: {r.text}")
+            return []
             
-            results = []
-            for item in items:
-                if not isinstance(item, dict):
-                    continue
-                results.append({
-                    "title": item.get("Title", ""),
-                    "url": item.get("Url", ""),
-                    "snippet": item.get("ContentText", ""),
-                    "engine": f"Zhihu (upvotes: {item.get('VoteUpCount', 0)} | comments: {item.get('CommentCount', 0)})"
-                })
-            return results
+        resp_data = r.json()
+        data = resp_data.get("Data") if isinstance(resp_data.get("Data"), dict) else {}
+        items = data.get("Items") if isinstance(data.get("Items"), list) else []
+        
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            results.append({
+                "title": item.get("Title", ""),
+                "url": item.get("Url", ""),
+                "snippet": item.get("ContentText", ""),
+                "engine": f"Zhihu (upvotes: {item.get('VoteUpCount', 0)} | comments: {item.get('CommentCount', 0)})"
+            })
+        return results
     except Exception as e:
         logger.error(f"Error querying Zhihu search API: {str(e)}")
         return []
 
 async def run_general_web_search(query: str) -> tuple[list[dict], str]:
-    TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-    EXA_API_KEY = os.getenv("EXA_API_KEY")
-    VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
-    
+
     # 0. Chinese query: run Volcengine + Tavily in parallel for comprehensive coverage
     #    Volcengine excels at domestic Chinese content (CSDN, 掘金, 知乎...)
     #    Tavily excels at international/official docs (Google, Cloudflare, AWS...)
@@ -474,14 +514,11 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     search_count += 1
     
     # Cache lookup
-    cache_key = f"{query}:{engines}:{page}"
+    cache_key = f"{query}:default:{page}" if not engines else f"{query}:{engines}:{page}"
     cached = search_cache.get(cache_key)
     if cached:
         logger.info(f"Cache HIT for search query: {query}")
         return cached
-        
-    # Read environment keys
-    ZHIHU_SECRET = os.getenv("ZHIHU_ACCESS_SECRET") or os.getenv("ZHIHU_API_KEY")
 
     # Parse engines option
     engines_list = [e.strip().lower() for e in engines.split(",")] if engines else []
@@ -499,7 +536,6 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         
     # 2. Check if hybrid / all / both requested
     elif "hybrid" in engines_list or "all" in engines_list or ("zhihu" in engines_list and len(engines_list) > 1):
-        # Run both in parallel
         web_task = asyncio.create_task(run_general_web_search(query))
         
         if ZHIHU_SECRET:
@@ -513,9 +549,6 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         
     # 3. Else, default web search (with optional forced single engine)
     else:
-        TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
-        EXA_API_KEY = os.getenv("EXA_API_KEY")
-        VOLC_SEARCH_API_KEY = os.getenv("VOLC_SEARCH_API_KEY") or os.getenv("VOLC_API_KEY")
         
         forced_engine = None
         for eng in engines_list:
@@ -580,8 +613,7 @@ def is_blocked_or_empty(text: str) -> bool:
     if not text or len(text.strip()) < 150:
         return True
     
-    # Check for blocking patterns
-    normalized = text.lower()
+    check_region = text[:2000].lower()
     block_signatures = [
         "cloudflare",
         "captcha",
@@ -597,14 +629,17 @@ def is_blocked_or_empty(text: str) -> bool:
         "datadome"
     ]
     for sig in block_signatures:
-        if sig in normalized:
+        if sig in check_region:
             logger.warning(f"Blocking signature detected: '{sig}'")
             return True
             
     return False
 
 def extract_main_content_heuristic(html_content: str, url: str) -> str:
-    soup = BeautifulSoup(html_content, "html.parser")
+    try:
+        soup = BeautifulSoup(html_content, "lxml")
+    except Exception:
+        soup = BeautifulSoup(html_content, "html.parser")
     
     # 1. Clean absolute structural noise first
     for element in list(soup.find_all(True)):
@@ -690,12 +725,12 @@ async def fallback_crawl(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        response = await client.get(url, headers=headers)
-        if response.status_code != 200:
-            raise Exception(f"HTTP status code {response.status_code}")
-            
-        return extract_main_content_heuristic(response.text, url)
+    client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=True)
+    response = await client.get(url, headers=headers)
+    if response.status_code != 200:
+        raise Exception(f"HTTP status code {response.status_code}")
+        
+    return extract_main_content_heuristic(response.text, url)
 
 async def crawl_scrapfly(url: str, api_key: str) -> str:
     """
@@ -711,24 +746,24 @@ async def crawl_scrapfly(url: str, api_key: str) -> str:
         "only_content": "true",
         "exclude_selectors": exclude_sel
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        logger.info(f"Attempting crawl via Scrapfly API for: {url}")
-        r = await client.get(scrapfly_url, params=params)
-        if r.status_code == 200:
-            data = r.json()
-            result = data.get("result", {})
-            content = result.get("content", "")
-            if content:
-                return content
-            else:
-                raise Exception("Scrapfly returned empty content")
+    client = http_client or httpx.AsyncClient(timeout=30.0)
+    logger.info(f"Attempting crawl via Scrapfly API for: {url}")
+    r = await client.get(scrapfly_url, params=params)
+    if r.status_code == 200:
+        data = r.json()
+        result = data.get("result", {})
+        content = result.get("content", "")
+        if content:
+            return content
         else:
-            err_msg = f"HTTP {r.status_code}"
-            try:
-                err_msg = r.json().get("detail", err_msg)
-            except:
-                pass
-            raise Exception(f"Scrapfly API failed: {err_msg}")
+            raise Exception("Scrapfly returned empty content")
+    else:
+        err_msg = f"HTTP {r.status_code}"
+        try:
+            err_msg = r.json().get("detail", err_msg)
+        except:
+            pass
+        raise Exception(f"Scrapfly API failed: {err_msg}")
 
 def chunk_markdown(text: str, max_chars: int = 1000, overlap: int = 200) -> list[str]:
     """
@@ -811,9 +846,18 @@ def rank_chunks(query: str, chunks: list[str]) -> list[tuple[float, int, str]]:
     }
     
     def tokenize(text: str) -> list[str]:
-        pattern = r'[a-zA-Z0-9_]+|[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]'
-        words = re.findall(pattern, text.lower())
-        return [w for w in words if w not in STOP_WORDS]
+        words = re.findall(r'[a-zA-Z0-9_]+|[\u4e00-\u9fff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]', text.lower())
+        result = []
+        i = 0
+        while i < len(words):
+            if re.match(r'[\u4e00-\u9fff]', words[i]):
+                if i + 1 < len(words) and re.match(r'[\u4e00-\u9fff]', words[i + 1]):
+                    result.append(words[i] + words[i + 1])
+                result.append(words[i])
+            else:
+                result.append(words[i])
+            i += 1
+        return [w for w in result if w not in STOP_WORDS]
         
     if not chunks:
         return []
@@ -911,19 +955,16 @@ async def crawl_firecrawl(url: str, api_key: str) -> str:
         "url": url,
         "formats": ["markdown"]
     }
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers)
-        if resp.status_code != 200:
-            raise Exception(f"Firecrawl API returned status code {resp.status_code}: {resp.text}")
-        data = resp.json()
-        if not data.get("success"):
-            raise Exception(f"Firecrawl scrape failed: {data.get('error', 'Unknown error')}")
-        return data.get("data", {}).get("markdown", "")
+    client = http_client or httpx.AsyncClient(timeout=30.0)
+    resp = await client.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers)
+    if resp.status_code != 200:
+        raise Exception(f"Firecrawl API returned status code {resp.status_code}: {resp.text}")
+    data = resp.json()
+    if not data.get("success"):
+        raise Exception(f"Firecrawl scrape failed: {data.get('error', 'Unknown error')}")
+    return data.get("data", {}).get("markdown", "")
 
-async def fetch_page_content(url: str) -> str:
-    SCRAPFLY_API_KEY = os.getenv("SCRAPFLY_API_KEY")
-    FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY")
-    
+async def _fetch_page_content_impl(url: str) -> str:
     # 1. Try local HTTP client with heuristic readability first
     logger.info(f"Attempting local HTTP crawl first: {url}")
     local_text = ""
@@ -945,8 +986,12 @@ async def fetch_page_content(url: str) -> str:
     if global_crawler is not None:
         logger.info(f"Local HTTP failed/blocked. Attempting local Crawl4AI crawl for: {url}")
         try:
-            run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
-            result = await global_crawler.arun(url=url, config=run_conf)
+            async with _browser_semaphore:
+                run_conf = CrawlerRunConfig(cache_mode=CacheMode.BYPASS)
+                result = await asyncio.wait_for(
+                    global_crawler.arun(url=url, config=run_conf),
+                    timeout=20.0
+                )
             if result.success and result.markdown:
                 if isinstance(result.markdown, str):
                     extracted_text = result.markdown
@@ -960,10 +1005,12 @@ async def fetch_page_content(url: str) -> str:
                         return crawl4ai_text
                     else:
                         logger.warning(f"Local Crawl4AI returned blocked or empty content for: {url}")
-                        crawl4ai_failed = False  # Succeeded execution but blocked
+                        crawl4ai_failed = False
             else:
                 err = result.error_message if hasattr(result, "error_message") else "Empty content"
                 logger.warning(f"Local Crawl4AI execution returned success=False or empty: {err}")
+        except asyncio.TimeoutError:
+            logger.error(f"Local Crawl4AI timed out (20s) for: {url}")
         except Exception as e_c4ai:
             logger.error(f"Local Crawl4AI execution failed with error: {str(e_c4ai)}")
     else:
@@ -976,7 +1023,6 @@ async def fetch_page_content(url: str) -> str:
             return await crawl_firecrawl(url, FIRECRAWL_API_KEY)
         except Exception as e_firecrawl:
             logger.error(f"Firecrawl failover failed: {str(e_firecrawl)}")
-            # Fall through to Scrapfly or others
 
     # 4. Failover to Scrapfly API if configured
     if SCRAPFLY_API_KEY:
@@ -985,7 +1031,6 @@ async def fetch_page_content(url: str) -> str:
             return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
         except Exception as e_scrapfly:
             logger.error(f"Scrapfly failover also failed: {str(e_scrapfly)}")
-            # Return any partial result we got
             if crawl4ai_text:
                 logger.info("Returning Crawl4AI text since Scrapfly also failed.")
                 return crawl4ai_text
@@ -995,12 +1040,15 @@ async def fetch_page_content(url: str) -> str:
             raise Exception(f"Crawl failed on all local methods, Firecrawl, and Scrapfly: {str(e_scrapfly)}")
     else:
         logger.warning("Local crawl paths failed/blocked, and Scrapfly API key is not configured.")
-        # Return best available local text
         if crawl4ai_text:
             return crawl4ai_text
         if not local_failed and local_text:
             return local_text
         raise Exception("All local crawl methods failed/blocked, and no Firecrawl/Scrapfly keys configured for failover.")
+
+
+async def fetch_page_content(url: str) -> str:
+    return await asyncio.wait_for(_fetch_page_content_impl(url), timeout=25.0)
 
 
 def generate_markdown_outline(markdown_text: str) -> str:
@@ -1034,6 +1082,15 @@ Please use the `crawl_page` tool again and provide a specific `query` parameter 
 {preview}
 """
 
+def _normalize_url_for_cache(url: str) -> str:
+    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+    parsed = urlparse(url)
+    query = urlencode(sorted(parse_qs(parsed.query).items())) if parsed.query else ""
+    path = parsed.path.rstrip('/')
+    if not path:
+        path = '/'
+    return urlunparse((parsed.scheme, parsed.netloc, path, parsed.params, query, ''))
+
 @mcp.tool()
 async def crawl_page(url: str, query: str | None = None) -> str:
     """
@@ -1054,11 +1111,11 @@ async def crawl_page(url: str, query: str | None = None) -> str:
     
     if not (url.startswith("http://") or url.startswith("https://")):
         return "Error: URL must start with http:// or https://"
-        
-    markdown_text = crawl_cache.get(url)
+    
+    normalized_url = _normalize_url_for_cache(url)
+    markdown_text = crawl_cache.get(normalized_url)
     
     if not markdown_text:
-        # Check if URL is GitHub and convert it
         github_raw_url = convert_github_url_to_raw(url)
         target_url = github_raw_url if github_raw_url else url
         
@@ -1066,7 +1123,6 @@ async def crawl_page(url: str, query: str | None = None) -> str:
             text = await fetch_page_content(target_url)
             markdown_text = text
         except Exception as e:
-            # If it's a GitHub URL defaulted to main and failed with 404/empty, try master branch fallback
             if github_raw_url and "/main/" in github_raw_url and ("404" in str(e) or "empty" in str(e).lower()):
                 fallback_github_url = github_raw_url.replace("/main/", "/master/", 1)
                 logger.info(f"GitHub main branch returned 404. Falling back to master branch: {fallback_github_url}")
@@ -1078,8 +1134,9 @@ async def crawl_page(url: str, query: str | None = None) -> str:
             else:
                 return f"Error crawling page '{url}': {str(e)}"
                 
-        # Cache the result under the ORIGINAL url so next requests hit the cache
-        crawl_cache.set(url, markdown_text)
+        crawl_cache.set(normalized_url, markdown_text)
+        if github_raw_url:
+            crawl_cache.set(_normalize_url_for_cache(github_raw_url), markdown_text)
 
     # If query is None but the webpage is extremely long, return outline to prevent client slowdown
     if not query and len(markdown_text) > 25000:
@@ -1186,8 +1243,7 @@ async def crawl_site(start_url: str, max_pages: int = 10, max_depth: int = 2, pr
     to_visit = [(start_url, 0)]  # (url, depth) tuples
     
     while to_visit and len(visited) < max_pages:
-        # Take next batch from the queue (up to remaining capacity)
-        batch = to_visit[:max_pages - len(visited)]
+        batch = to_visit[:3]
         to_visit = to_visit[len(batch):]
         
         batch_urls = [url for url, _ in batch]
@@ -1195,7 +1251,6 @@ async def crawl_site(start_url: str, max_pages: int = 10, max_depth: int = 2, pr
         
         logger.info(f"Crawling batch of {len(batch_urls)} pages (depths: {[d for _, d in batch]})...")
         
-        # Check cache first, fetch uncached pages concurrently
         fetch_tasks = {}
         for url in batch_urls:
             cached = crawl_cache.get(url)
@@ -1207,8 +1262,14 @@ async def crawl_site(start_url: str, max_pages: int = 10, max_depth: int = 2, pr
                 fetch_tasks[url] = fetch_page_content(url)
         
         if fetch_tasks:
+            async def _fetch_with_limit(u, coro):
+                async with _crawl_semaphore:
+                    await asyncio.sleep(0.3)
+                    return await coro
+            
             task_urls = list(fetch_tasks.keys())
-            results = await asyncio.gather(*fetch_tasks.values(), return_exceptions=True)
+            limited_tasks = [_fetch_with_limit(u, fetch_tasks[u]) for u in task_urls]
+            results = await asyncio.gather(*limited_tasks, return_exceptions=True)
             
             for url, result in zip(task_urls, results):
                 crawl_count += 1
@@ -1299,13 +1360,25 @@ async def init_crawler_bg():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global http_client
+    http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=15.0, write=5.0, pool=5.0),
+        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        follow_redirects=True
+    )
+    logger.info("Global httpx client initialized with connection pooling.")
+
     if CRAWL4AI_AVAILABLE:
-        # Launch crawler in non-blocking background task
         asyncio.create_task(init_crawler_bg())
     else:
         logger.warning("Crawl4AI is not available, skipping crawler task creation in lifespan.")
         
     yield
+    
+    if http_client:
+        await http_client.aclose()
+        http_client = None
+        logger.info("Global httpx client closed.")
     
     if global_crawler:
         logger.info("Closing global AsyncWebCrawler...")
