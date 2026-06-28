@@ -50,6 +50,19 @@ _crawl_semaphore = asyncio.Semaphore(3)
 # Global httpx client with connection pooling (reused across all requests)
 http_client: httpx.AsyncClient | None = None
 
+@asynccontextmanager
+async def get_http_client(timeout_seconds: float = 10.0, follow_redirects: bool = False, verify: bool = True):
+    global http_client
+    if http_client is not None:
+        yield http_client
+    else:
+        async with httpx.AsyncClient(
+            timeout=timeout_seconds,
+            follow_redirects=follow_redirects,
+            verify=verify
+        ) as client:
+            yield client
+
 # Auto-detect memory limits to prevent container OOM crashes on low-resource environments like DCD
 if CRAWL4AI_AVAILABLE:
     disable_env = os.getenv("DISABLE_LOCAL_BROWSER", "").lower() in ("true", "1", "yes")
@@ -151,12 +164,15 @@ async def search_duckduckgo_raw(query: str) -> list[dict]:
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8"
     }
     try:
-        client = http_client or httpx.AsyncClient(timeout=10.0)
-        res = await client.post(url, data=params, headers=headers)
+        async with get_http_client(timeout_seconds=10.0) as client:
+            res = await client.post(url, data=params, headers=headers)
         if res.status_code != 200:
             return []
             
-        soup = BeautifulSoup(res.text, "lxml")
+        try:
+            soup = BeautifulSoup(res.text, "lxml")
+        except Exception:
+            soup = BeautifulSoup(res.text, "html.parser")
         results = soup.select(".result")
         if not results:
             return []
@@ -222,8 +238,8 @@ async def search_volcengine(query: str, api_key: str) -> list[dict]:
         "NeedSummary": True
     }
     logger.info(f"search_volcengine API call: Query='{query}', Key='{api_key[:4]}...{api_key[-4:]}'")
-    client = http_client or httpx.AsyncClient(timeout=10.0)
-    r = await client.post(url, json=payload, headers=headers)
+    async with get_http_client(timeout_seconds=10.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
     logger.info(f"search_volcengine API response status: {r.status_code}")
     if r.status_code == 200:
         data = r.json()
@@ -255,8 +271,8 @@ async def search_tavily(query: str, api_key: str) -> list[dict]:
         "query": query,
         "max_results": 10
     }
-    client = http_client or httpx.AsyncClient(timeout=10.0)
-    r = await client.post(url, json=payload)
+    async with get_http_client(timeout_seconds=10.0) as client:
+        r = await client.post(url, json=payload)
     if r.status_code == 200:
         data = r.json()
         return [
@@ -286,8 +302,8 @@ async def search_exa(query: str, api_key: str) -> list[dict]:
             }
         }
     }
-    client = http_client or httpx.AsyncClient(timeout=10.0)
-    r = await client.post(url, json=payload, headers=headers)
+    async with get_http_client(timeout_seconds=10.0) as client:
+        r = await client.post(url, json=payload, headers=headers)
     if r.status_code == 200:
         data = r.json()
         return [
@@ -344,9 +360,9 @@ async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
             verify_opt = False
             
     try:
-        client = http_client or httpx.AsyncClient(timeout=15.0, verify=verify_opt)
-        logger.info(f"Attempting search via Zhihu API for query: {query}")
-        r = await client.get(endpoint, params=params, headers=headers)
+        async with get_http_client(timeout_seconds=15.0, verify=verify_opt) as client:
+            logger.info(f"Attempting search via Zhihu API for query: {query}")
+            r = await client.get(endpoint, params=params, headers=headers)
         if r.status_code != 200:
             logger.error(f"Zhihu API failed with status {r.status_code}: {r.text}")
             return []
@@ -725,8 +741,8 @@ async def fallback_crawl(url: str) -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
-    client = http_client or httpx.AsyncClient(timeout=15.0, follow_redirects=True)
-    response = await client.get(url, headers=headers)
+    async with get_http_client(timeout_seconds=15.0, follow_redirects=True) as client:
+        response = await client.get(url, headers=headers)
     if response.status_code != 200:
         raise Exception(f"HTTP status code {response.status_code}")
         
@@ -746,9 +762,9 @@ async def crawl_scrapfly(url: str, api_key: str) -> str:
         "only_content": "true",
         "exclude_selectors": exclude_sel
     }
-    client = http_client or httpx.AsyncClient(timeout=30.0)
-    logger.info(f"Attempting crawl via Scrapfly API for: {url}")
-    r = await client.get(scrapfly_url, params=params)
+    async with get_http_client(timeout_seconds=30.0) as client:
+        logger.info(f"Attempting crawl via Scrapfly API for: {url}")
+        r = await client.get(scrapfly_url, params=params)
     if r.status_code == 200:
         data = r.json()
         result = data.get("result", {})
@@ -955,8 +971,8 @@ async def crawl_firecrawl(url: str, api_key: str) -> str:
         "url": url,
         "formats": ["markdown"]
     }
-    client = http_client or httpx.AsyncClient(timeout=30.0)
-    resp = await client.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers)
+    async with get_http_client(timeout_seconds=30.0) as client:
+        resp = await client.post("https://api.firecrawl.dev/v1/scrape", json=payload, headers=headers)
     if resp.status_code != 200:
         raise Exception(f"Firecrawl API returned status code {resp.status_code}: {resp.text}")
     data = resp.json()
@@ -1085,7 +1101,7 @@ Please use the `crawl_page` tool again and provide a specific `query` parameter 
 def _normalize_url_for_cache(url: str) -> str:
     from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
     parsed = urlparse(url)
-    query = urlencode(sorted(parse_qs(parsed.query).items())) if parsed.query else ""
+    query = urlencode(sorted(parse_qs(parsed.query).items()), doseq=True) if parsed.query else ""
     path = parsed.path.rstrip('/')
     if not path:
         path = '/'

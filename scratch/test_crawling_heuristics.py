@@ -88,7 +88,7 @@ async def test_all():
         
     app.fallback_crawl = mock_fallback_crawl_clean
     app.crawl_scrapfly = mock_crawl_scrapfly
-    os.environ["SCRAPFLY_API_KEY"] = "mock_key"
+    app.SCRAPFLY_API_KEY = "mock_key"
     
     res = await fetch_page_content("https://example.com/clean")
     print("Result:", res[:80])

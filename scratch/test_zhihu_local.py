@@ -62,9 +62,8 @@ async def test_all():
                 "engine": "Zhihu (upvotes: 100 | comments: 23)"
             }
         ]
-    app.search_zhihu = mock_search_zhihu
-    # Set the secret so hybrid doesn't skip it
-    os.environ["ZHIHU_ACCESS_SECRET"] = "dummy_secret"
+    app.search_zhihu_impl = mock_search_zhihu
+    app.ZHIHU_SECRET = "dummy_secret"
     
     res = await search_web(query="Python 3.12", engines="hybrid")
     print("Result:")
