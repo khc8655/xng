@@ -82,6 +82,14 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 ├── .wasmerignore                # Wasmer 上传包忽略文件
 ├── wasmer/
 │   └── site-packages/           # 本地预编译的 WASIX WebAssembly Python 库（用于 Edge 部署）
+├── edgeone-mcp/                 # 腾讯 EdgeOne Makers 独立部署包目录
+│   ├── edgeone.json             # EdgeOne 部署边界配置文件
+│   ├── requirements.txt         # EdgeOne 平台构建依赖声明
+│   ├── .env.example             # 触发 AI Gateway 密钥自动拉取与注入的模板文件
+│   └── cloud-functions/
+│       └── api/
+│           ├── index.py         # EdgeOne 满血版 Python ASGI 入口（内嵌 FastAPI 路由与 MCP 逻辑）
+│           └── requirements.txt # EdgeOne 运行时自定义包依赖列表
 └── scratch/                     # 本地测试工具与测试套件目录
     ├── run_manual_tests.py      # 测试运行器（一次性运行所有本地集成测试）
     ├── test_pipeline_local.py   # Heuristic -> Crawl4AI 级联抓取流水线测试
@@ -119,7 +127,7 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 
 ---
 
-## 🚀 三大安装部署方式
+## 🚀 四大安装部署方式
 
 ### 方案 A：Hugging Face Spaces 部署（最推荐，持久免维护）
 
@@ -163,6 +171,36 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
    wasmer deploy
    ```
 3. 服务会自动打包并发布至 Wasmer Edge 平台。运行环境为 pure python (Wasm 架构)，不包含动态 Chrome 依赖，自动以 Tier 1 (Heuristics) + Tier 3 (Scrapfly/Firecrawl Cloud) 模式无缝运转，完全实现 scale-to-zero（零使用零计费）。
+
+### 方案 D：Tencent EdgeOne Makers 部署（极速 Serverless & AI 总结内置）
+
+适合在腾讯 EdgeOne 边缘函数上跑无服务器的 full ASGI FastAPI 服务。自带智能 AI 网页内容自动总结功能（底层使用 EdgeOne 每月免费赠送的 50 万 token LLM 资源）。
+
+#### 1. 前置准备与项目关联
+- 确保你已安装 `edgeone` CLI 工具且已执行 `edgeone login` 完成登录。
+- 进入腾讯 EdgeOne Makers 独立部署包目录 `edgeone-mcp/`，执行项目关联命令（关联至你的 EdgeOne 空间项目）：
+  ```bash
+  cd edgeone-mcp/
+  edgeone makers link
+  ```
+- 关联成功后，本地会自动生成 `.edgeone/project.json`。
+
+#### 2. 本地开发调试
+- 启动本地 EdgeOne Makers 开发者服务：
+  ```bash
+  edgeone makers dev
+  ```
+- **核心优化提示 (自动密钥拉取)**：由于我们在目录中放置了 `.env.example`，CLI 在启动时会自动在本地调用腾讯云接口获取 AI Gateway 相关的 `AI_GATEWAY_API_KEY` 和 `AI_GATEWAY_BASE_URL` 环境变量，自动持久化写入 `.env` 并注入给 Python server。无需手动配置模型网关秘钥即可使用 DeepSeek 总结功能！
+- **重要网关代理与 Streaming 绕行路径**：
+  EdgeOne 的本地 dev server 网关代理存在针对 HTTP GET 请求的 `probe+retry` 缓冲机制，这会阻断 SSE（Server-Sent Events）长连接的实时头部返回，导致 MCP 客户端连接卡死超时。
+  **解决方案**：客户端发起 SSE GET 连接时，请在 URL 尾部添加一个斜杠 `/`，即使用 `http://localhost:8088/api/mcp/sse/` 代替 `http://localhost:8088/api/mcp/sse`。这会触发 EdgeOne 网关的 `can_retry` 绕行逻辑，绕过缓冲区，从而获得完美的即时 SSE 流式响应！
+
+#### 3. 云端一键部署
+- 在 `edgeone-mcp/` 目录下执行部署：
+  ```bash
+  edgeone makers deploy
+  ```
+- 平台将完成 requirements 自定义包的动态构建与静态依赖检查，自动在边缘节点发布你的 Python ASGI 实例，并提供专用的 Preview/Preset 访问域名。
 
 ---
 

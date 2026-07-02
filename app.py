@@ -1196,12 +1196,18 @@ def extract_markdown_links(markdown_text: str, current_url: str) -> list[str]:
     """Extract unique absolute HTTP(S) links from Markdown text, excluding images and static assets."""
     import urllib.parse
     # Match [text](url) but NOT ![alt](url) — use negative lookbehind for '!'
-    matches = re.findall(r'(?<!!)\[[^\]]*\]\(([^)\s]+)\)', markdown_text)
+    # Allow spaces inside parentheses to capture hover titles like [text](url "title")
+    matches = re.findall(r'(?<!!)\[[^\]]*\]\(([^)]+)\)', markdown_text)
     resolved = set()
     # Common static file extensions to exclude
     static_exts = {'.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.css', '.js', '.pdf', '.zip', '.tar', '.gz', '.mp4', '.mp3', '.woff', '.woff2', '.ttf', '.eot'}
     for link in matches:
-        link_clean = link.split("#")[0].split("?")[0].strip()
+        # Extract the URL portion (the first space-separated token if title is present)
+        link_stripped = link.strip()
+        if not link_stripped:
+            continue
+        link_url = link_stripped.split()[0]
+        link_clean = link_url.split("#")[0].split("?")[0].strip()
         if not link_clean or len(link_clean) > 500:
             continue
         abs_url = urllib.parse.urljoin(current_url, link_clean)
