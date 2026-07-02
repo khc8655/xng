@@ -1380,6 +1380,9 @@ async def init_crawler_bg():
         logger.error(f"Failed to initialize global AsyncWebCrawler in background task: {str(e)}")
         global_crawler = None
 
+# Initialize Streamable HTTP application
+streamable_http_asgi_app = mcp.streamable_http_app()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global http_client
@@ -1395,7 +1398,8 @@ async def lifespan(app: FastAPI):
     else:
         logger.warning("Crawl4AI is not available, skipping crawler task creation in lifespan.")
         
-    yield
+    async with mcp.session_manager.run():
+        yield
     
     if http_client:
         await http_client.aclose()
@@ -1416,8 +1420,8 @@ app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
 
 class SimpleAuthMiddleware:
     """
-    A cleaner ASGI middleware that ONLY handles Bearer token authentication
-    for the /mcp routes, without breaking ASGI path routing or FastMCP apps.
+    A cleaner ASGI middleware that handles Bearer token authentication
+    for the /mcp routes and routes Streamable HTTP requests to the proper app.
     """
     def __init__(self, app):
         self.app = app
@@ -1429,11 +1433,14 @@ class SimpleAuthMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "")
+        headers = dict(scope.get("headers", []))
 
-        # Only protect /mcp routes, but exclude /mcp/messages since SSE clients do not send headers on POST
-        if path.startswith("/mcp") and not path.startswith("/mcp/messages") and BEARER_TOKEN:
+        # Check if request has a secure session ID header or is a message endpoint
+        has_secure_session = (b"mcp-session-id" in headers) or path.startswith("/mcp/messages")
+
+        # Only protect /mcp routes, but exclude paths holding a secure session
+        if path.startswith("/mcp") and not has_secure_session and BEARER_TOKEN:
             from urllib.parse import parse_qs
-            headers = dict(scope.get("headers", []))
             query_string = scope.get("query_string", b"").decode("utf-8")
             token = None
             
@@ -1460,9 +1467,20 @@ class SimpleAuthMiddleware:
 
             import secrets
             if not secrets.compare_digest(token, BEARER_TOKEN):
-                logger.warning(f"Auth failed (Invalid Token - length {len(token)} vs expected {len(BEARER_TOKEN)}): {method} {path}")
+                logger.warning(f"Auth failed (Invalid Token): {method} {path}")
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
+
+        # Route Streamable HTTP requests to the dedicated application
+        is_streamable_http = False
+        if path in ["/mcp", "/mcp/", "/mcp/sse", "/mcp/sse/"]:
+            if method in ["POST", "DELETE"] or (method == "GET" and b"mcp-session-id" in headers):
+                is_streamable_http = True
+
+        if is_streamable_http:
+            scope["path"] = "/mcp"
+            await streamable_http_asgi_app(scope, receive, send)
+            return
 
         # Pass through to the underlying FastAPI app and FastMCP mounts
         await self.app(scope, receive, send)
