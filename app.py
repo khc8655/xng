@@ -492,8 +492,10 @@ async def search_github(
         return "Error: search_type must be one of 'repositories', 'issues', or 'code'."
     
     token = os.getenv("GITHUB_TOKEN")
+    # Use text-match header for code search to get code snippets in results
+    accept_header = "application/vnd.github.text-match+json" if search_type == "code" else "application/vnd.github+json"
     headers = {
-        "Accept": "application/vnd.github+json",
+        "Accept": accept_header,
         "User-Agent": "MCP-Search-Server"
     }
     if token:
@@ -507,11 +509,15 @@ async def search_github(
     }
     
     try:
-        client = http_client if http_client else httpx.AsyncClient()
-        response = await client.get(url, headers=headers, params=params, timeout=10.0)
+        async with get_http_client(timeout_seconds=15.0) as client:
+          response = await client.get(url, headers=headers, params=params)
         
+        if response.status_code == 403:
+            reset_time = response.headers.get("X-RateLimit-Reset", "unknown")
+            return f"GitHub API rate limit exceeded (resets at Unix timestamp: {reset_time}). Set the GITHUB_TOKEN environment variable to increase the rate limit."
         if response.status_code != 200:
-            return f"Error: GitHub API returned status code {response.status_code}. Response: {response.text}"
+            error_preview = response.text[:200]
+            return f"Error: GitHub API returned status code {response.status_code}. Response: {error_preview}"
             
         data = response.json()
         items = data.get("items", [])
@@ -523,7 +529,7 @@ async def search_github(
             for idx, item in enumerate(items, 1):
                 name = item.get("full_name", "")
                 url_repo = item.get("html_url", "")
-                desc = item.get("description", "No description provided.")
+                desc = item.get("description") or "No description provided."
                 stars = item.get("stargazers_count", 0)
                 forks = item.get("forks_count", 0)
                 issues = item.get("open_issues_count", 0)
@@ -558,9 +564,15 @@ async def search_github(
                 url_file = item.get("html_url", "")
                 repo_name = item.get("repository", {}).get("full_name", "")
                 repo_url = item.get("repository", {}).get("html_url", "")
+                # Extract code snippets from text_matches (requires text-match Accept header)
+                snippets = item.get("text_matches", [])
+                snippet_text = ""
+                if snippets:
+                    fragment = snippets[0].get("fragment", "").strip()
+                    snippet_text = f"\n   Snippet: `{fragment[:200]}`" if fragment else ""
                 formatted.append(
                     f"{idx}. **[{file_name}]({url_file})** in [{repo_name}]({repo_url})\n"
-                    f"   Path: `{file_path}`\n"
+                    f"   Path: `{file_path}`{snippet_text}\n"
                 )
                 
         return "\n".join(formatted)
