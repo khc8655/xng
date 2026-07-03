@@ -470,6 +470,104 @@ async def run_general_web_search(query: str) -> tuple[list[dict], str]:
     return results, "DuckDuckGo"
 
 @mcp.tool()
+async def search_github(
+    query: str,
+    search_type: str = "repositories",
+    page: int = 1,
+    per_page: int = 10
+) -> str:
+    """
+    Search GitHub repositories, issues, pull requests, or code.
+    
+    Use this tool when you need to find open-source repositories, check GitHub issues/PR status,
+    or look for specific code implementations on GitHub.
+    
+    Args:
+        query: The search query (e.g., "gemini proxy" or "repo:NousResearch/hermes-agent state:closed").
+        search_type: The type of search. Must be one of: "repositories", "issues", "code". Defaults to "repositories".
+        page: Page number for pagination (starts at 1).
+        per_page: Number of results per page (max 30, defaults to 10).
+    """
+    if search_type not in ["repositories", "issues", "code"]:
+        return "Error: search_type must be one of 'repositories', 'issues', or 'code'."
+    
+    token = os.getenv("GITHUB_TOKEN")
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "MCP-Search-Server"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        
+    url = f"https://api.github.com/search/{search_type}"
+    params = {
+        "q": query,
+        "page": page,
+        "per_page": min(max(1, per_page), 30)
+    }
+    
+    try:
+        client = http_client if http_client else httpx.AsyncClient()
+        response = await client.get(url, headers=headers, params=params, timeout=10.0)
+        
+        if response.status_code != 200:
+            return f"Error: GitHub API returned status code {response.status_code}. Response: {response.text}"
+            
+        data = response.json()
+        items = data.get("items", [])
+        if not items:
+            return f"No GitHub {search_type} found matching query: '{query}'."
+            
+        formatted = []
+        if search_type == "repositories":
+            for idx, item in enumerate(items, 1):
+                name = item.get("full_name", "")
+                url_repo = item.get("html_url", "")
+                desc = item.get("description", "No description provided.")
+                stars = item.get("stargazers_count", 0)
+                forks = item.get("forks_count", 0)
+                issues = item.get("open_issues_count", 0)
+                updated = item.get("updated_at", "")
+                formatted.append(
+                    f"{idx}. **[{name}]({url_repo})**\n"
+                    f"   ⭐ Stars: {stars} | 🍴 Forks: {forks} | 🐛 Open Issues: {issues}\n"
+                    f"   Description: {desc}\n"
+                    f"   Updated: {updated}\n"
+                )
+        elif search_type == "issues":
+            for idx, item in enumerate(items, 1):
+                title = item.get("title", "")
+                url_issue = item.get("html_url", "")
+                state = item.get("state", "")
+                author = item.get("user", {}).get("login", "")
+                created = item.get("created_at", "")
+                closed = item.get("closed_at", "")
+                body = item.get("body", "")
+                body_snippet = body[:150] + "..." if body and len(body) > 150 else (body or "No description.")
+                
+                closed_info = f" | Closed: {closed}" if closed else ""
+                formatted.append(
+                    f"{idx}. **[{title}]({url_issue})**\n"
+                    f"   State: `{state}` | Author: {author} | Created: {created}{closed_info}\n"
+                    f"   Snippet: {body_snippet}\n"
+                )
+        elif search_type == "code":
+            for idx, item in enumerate(items, 1):
+                file_name = item.get("name", "")
+                file_path = item.get("path", "")
+                url_file = item.get("html_url", "")
+                repo_name = item.get("repository", {}).get("full_name", "")
+                repo_url = item.get("repository", {}).get("html_url", "")
+                formatted.append(
+                    f"{idx}. **[{file_name}]({url_file})** in [{repo_name}]({repo_url})\n"
+                    f"   Path: `{file_path}`\n"
+                )
+                
+        return "\n".join(formatted)
+    except Exception as e:
+        return f"Error executing GitHub search: {str(e)}"
+
+@mcp.tool()
 async def search_zhihu(query: str, count: int = 5) -> str:
     """
     Search Zhihu (知乎) - the premier Chinese high-quality Q&A, technical articles, and knowledge sharing community.
