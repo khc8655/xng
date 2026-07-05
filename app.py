@@ -1624,6 +1624,17 @@ app.mount("/mcp", mcp.sse_app())
 async def health_check():
     return {"status": "ok", "active_engines": get_active_engines(), "auth_enabled": BEARER_TOKEN is not None}
 
+@app.get("/debug/firecrawl")
+async def debug_firecrawl(url: str = "https://example.com"):
+    if not FIRECRAWL_API_KEY:
+        return {"error": "FIRECRAWL_API_KEY is not set on this server"}
+    try:
+        res = await crawl_firecrawl(url, FIRECRAWL_API_KEY)
+        return {"status": "success", "length": len(res), "preview": res[:500]}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error_message": str(e), "traceback": traceback.format_exc()}
+
 # API Endpoint to fetch current stats
 @app.get("/api/stats")
 async def api_stats():
