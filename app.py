@@ -1148,7 +1148,7 @@ async def _fetch_page_content_impl(url: str) -> str:
         try:
             return await crawl_firecrawl(url, FIRECRAWL_API_KEY)
         except Exception as e_firecrawl:
-            logger.error(f"Firecrawl failover failed: {str(e_firecrawl)}")
+            logger.exception("Firecrawl failover failed")
 
     # 4. Failover to Scrapfly API if configured
     if SCRAPFLY_API_KEY:
@@ -1156,7 +1156,7 @@ async def _fetch_page_content_impl(url: str) -> str:
         try:
             return await crawl_scrapfly(url, SCRAPFLY_API_KEY)
         except Exception as e_scrapfly:
-            logger.error(f"Scrapfly failover also failed: {str(e_scrapfly)}")
+            logger.exception("Scrapfly failover also failed")
             if crawl4ai_text:
                 logger.info("Returning Crawl4AI text since Scrapfly also failed.")
                 return crawl4ai_text
