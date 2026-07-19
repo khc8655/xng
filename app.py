@@ -1560,15 +1560,26 @@ class SimpleAuthMiddleware:
             query_string = scope.get("query_string", b"").decode("utf-8")
             token = None
             
-            # Check Authorization header
-            auth_header_bytes = headers.get(b"authorization", b"")
-            if auth_header_bytes:
-                auth_header = auth_header_bytes.decode("utf-8")
-                parts = auth_header.split()
+            # Check X-MCP-Token header (forwarded by proxy CDN to avoid auth header collision)
+            mcp_token_bytes = headers.get(b"x-mcp-token", b"")
+            if mcp_token_bytes:
+                mcp_token = mcp_token_bytes.decode("utf-8")
+                parts = mcp_token.split()
                 if len(parts) == 2 and parts[0].lower() == "bearer":
                     token = parts[1]
                 else:
-                    token = auth_header
+                    token = mcp_token
+            
+            # Check Authorization header
+            if not token:
+                auth_header_bytes = headers.get(b"authorization", b"")
+                if auth_header_bytes:
+                    auth_header = auth_header_bytes.decode("utf-8")
+                    parts = auth_header.split()
+                    if len(parts) == 2 and parts[0].lower() == "bearer":
+                        token = parts[1]
+                    else:
+                        token = auth_header
             
             # Check query param
             if not token and query_string:
