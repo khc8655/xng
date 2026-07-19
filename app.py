@@ -22,6 +22,13 @@ logging.getLogger("mcp.server.lowlevel.server").setLevel(logging.WARNING)
 
 BEARER_TOKEN = os.getenv("BEARER_TOKEN")
 
+logger.info("=== Environment Debug ===")
+logger.info(f"BEARER_TOKEN: {BEARER_TOKEN[:5] + '...' if BEARER_TOKEN else None}")
+for k, v in os.environ.items():
+    if k.startswith("HF_") or k.startswith("SPACE_") or "TOKEN" in k or "KEY" in k:
+        logger.info(f"{k}: {v[:10] + '...' if v else None}")
+logger.info("=========================")
+
 # Cache environment variables at startup to avoid repeated os.getenv calls
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 EXA_API_KEY = os.getenv("EXA_API_KEY")
