@@ -1643,6 +1643,15 @@ class SimpleAuthMiddleware:
 
 app.add_middleware(SimpleAuthMiddleware)
 
+# Trailing-slash handler to bypass Hugging Face gateway 503/500 blocks on /mcp/sse
+@app.get("/mcp/sse/")
+async def mcp_sse_slash_handler(request: Request):
+    sse_asgi = mcp.sse_app()
+    scope = dict(request.scope)
+    scope["path"] = "/sse"
+    scope["root_path"] = scope.get("root_path", "").rstrip("/") + "/mcp"
+    await sse_asgi(scope, request._receive, request._send)
+
 # Mount native FastMCP SSE app
 # The SSE endpoint will be available at GET /mcp/sse (since FastMCP sse_app maps /sse internally)
 # Wait, FastMCP's sse_app() internally creates Starlette routes: GET / and POST /messages
