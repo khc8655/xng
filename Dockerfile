@@ -1,16 +1,25 @@
+# ---- Stage 1: Build (编译 C 扩展如 lxml) ----
+FROM python:3.11-slim AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements-hf.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements-hf.txt
+
+# ---- Stage 2: Runtime (仅运行时依赖) ----
 FROM python:3.11-slim
 
-# Set environment variables
 ENV PYTHONUNBUFFERED=1 \
     DEBIAN_FRONTEND=noninteractive \
     PLAYWRIGHT_BROWSERS_PATH=/home/user/.cache/ms-playwright
 
-# Install basic tools and compilation dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    wget \
-    curl \
-    ca-certificates \
-    build-essential \
+# 从 builder 阶段复制已编译的 Python 包
+COPY --from=builder /install /usr/local
+
+# 安装 Playwright Chromium 及其系统依赖（--with-deps 会自动装 libX11 等运行时库）
+RUN playwright install chromium --with-deps \
     && rm -rf /var/lib/apt/lists/*
 
 # Create user with UID 1000
@@ -20,18 +29,7 @@ ENV HOME=/home/user \
 
 WORKDIR $HOME/app
 
-# Copy requirements and install
-COPY requirements-hf.txt .
-RUN pip install --no-cache-dir -r requirements-hf.txt
-
-# Install Playwright Chromium and system dependencies
-RUN playwright install chromium --with-deps
-
-# Pre-install dependencies (if any) and set ownership
-RUN chown -R user:user /home/user && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy the rest of the application files and set ownership
+# Copy the application files and set ownership
 COPY --chown=user . $HOME/app
 
 # Switch to the non-root user
@@ -40,7 +38,6 @@ USER user
 # Ensure files are executable
 RUN chmod +x start.sh
 
-# Expose the default port for HF Spaces
 EXPOSE 7860
 
 ENTRYPOINT ["./start.sh"]
