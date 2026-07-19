@@ -32,7 +32,7 @@ pinned: false
                            ┌──────────────────────┐
                            │   FastMCP Routing    │
                            └────┬────────────┬────┘
-                                │            │
+                                ├────────────┤
          ┌──────────────────────┘            └──────────────────────┐
          ▼                                                          ▼
   ┌──────────────┐                                           ┌──────────────┐
@@ -72,37 +72,26 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 ```
 .
 ├── app.py                       # 核心入口文件（包含所有 MCP 接口、Web 控制台和业务逻辑）
-├── Dockerfile                   # 用于 Hugging Face Spaces 和 Docker 部署的容器定义
-├── start.sh                     # 容器启动脚本（处理 Playwright 依赖检查和后台预初始化）
+├── Dockerfile                   # 生产多阶段构建 Docker 镜像定义（已做大小与编译期优化）
+├── start.sh                     # 容器启动脚本
 ├── wasmer.toml                  # Wasmer Edge 部署配置文件
 ├── app.yaml                     # Wasmer Edge 路由描述文件
-├── requirements.txt             # 基础依赖依赖（WASM 版本不包含 Crawl4AI 等大体积包）
+├── requirements.txt             # 基础依赖（不含动态浏览器等大体积包）
 ├── requirements-hf.txt          # 满血版依赖（包含 Crawl4AI, Playwright, lxml）
-├── .gitignore                   # Git 忽略文件
-├── .wasmerignore                # Wasmer 上传包忽略文件
+├── .gitignore                   # Git 忽略配置
+├── .wasmerignore                # Wasmer 忽略配置
 ├── wasmer/
-│   └── site-packages/           # 本地预编译的 WASIX WebAssembly Python 库（用于 Edge 部署）
+│   └── site-packages/           # 本地预编译的 WASIX WebAssembly Python 库
 ├── edgeone-mcp/                 # 腾讯 EdgeOne Makers 独立部署包目录
-│   ├── edgeone.json             # EdgeOne 部署边界配置文件
-│   ├── requirements.txt         # EdgeOne 平台构建依赖声明
-│   ├── .env.example             # 触发 AI Gateway 密钥自动拉取与注入的模板文件
-│   └── cloud-functions/
-│       └── api/
-│           ├── index.py         # EdgeOne 满血版 Python ASGI 入口（内嵌 FastAPI 路由与 MCP 逻辑）
-│           └── requirements.txt # EdgeOne 运行时自定义包依赖列表
-└── scratch/                     # 本地测试工具与测试套件目录
-    ├── run_manual_tests.py      # 测试运行器（一次性运行所有本地集成测试）
-    ├── test_pipeline_local.py   # Heuristic -> Crawl4AI 级联抓取流水线测试
-    ├── test_crawling_heuristics.py # Readability 抓取与封锁检测测试
-    ├── test_zhihu_local.py      # 混合检索与知乎 API Mock 测试
-    └── cf_snippet.js            # 备用：Cloudflare Worker 边缘双流网关路由脚本
+└── scratch/                     # 本地测试与网关辅助脚本目录（被 Git 忽略）
+    ├── test_mcp_client_real.py  # 官方 Python MCP SDK SSE 客户端集成测试
+    ├── test_custom_domain_direct.py # 针对自定义域名边缘网关的端到端测试
+    └── cf_snippet.js            # 最新版 Cloudflare Worker 双向 Token 翻译与容灾网关脚本
 ```
 
 ---
 
 ## ⚙️ 配置与环境变量
-
-你可以在部署容器或本地启动时，通过环境变量配置服务器的行为：
 
 ### 1. 安全与鉴权
 | 变量名 | 默认值 | 说明 |
@@ -116,42 +105,40 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 | `EXA_API_KEY` | Exa.ai 语义搜索引擎 Key | [Exa 官网](https://exa.ai/) |
 | `VOLC_SEARCH_API_KEY` | 火山引擎（抖音/字节）定制搜索引擎 Key | [火山引擎控制台](https://www.volcengine.com/) |
 | `ZHIHU_ACCESS_SECRET` | 知乎内容检索 OpenAPI Key | 内部开发者授权申请 |
-| `SEARXNG_URL` | SearXNG 私有部署/公共网关地址 (可选备份) | 自建或使用公共节点 |
 
 ### 3. 网页抓取配置
 | 变量名 | 说明 | 获取渠道 |
 | :--- | :--- | :--- |
 | `FIRECRAWL_API_KEY` | Firecrawl 网页爬取与转 Markdown API Key | [Firecrawl 官网](https://www.firecrawl.dev/) |
 | `SCRAPFLY_API_KEY` | Scrapfly 住宅代理越盾爬虫 API Key | [Scrapfly 官网](https://scrapfly.io/) |
-| `DISABLE_LOCAL_BROWSER` | 设置为 `true` 时，强制停用本地 Crawl4AI 动态浏览器（转为纯轻量抓取）| 本地环境调试或低配机 |
+| `DISABLE_LOCAL_BROWSER` | 设置为 `true` 时，强制停用本地 Crawl4AI 动态浏览器 | 低配机器优化 |
 
 ---
 
-## 🚀 四大安装部署方式
+## 🚀 五大安装部署方式
 
-### 方案 A：Hugging Face Spaces 部署（最推荐，持久免维护）
+### 方案 A：Hugging Face Spaces 部署（公开空间最佳实践，推荐 ⭐）
 
 本项目原生支持 Hugging Face Spaces Docker 部署，在多端 AI Agents 中可作为持久的云端 MCP 服务。
 
-1. 在 Hugging Face 上创建一个 **New Space**。
-2. SDK 选择 **Docker**，模板选择 **Blank**（非 Gradio/Streamlit）。
-3. 关联你的 Git 仓库，或者添加 Hugging Face 为远程仓库推送到 Space：
+1. 在 Hugging Face 上创建一个 **New Space**，SDK 选择 **Docker**，模板选择 **Blank**。
+2. 将该 Space 的 **Visibility 设为 Public**（为了方便 GitHub 保活监控以及规避私有状态下 HF 网关对 `/mcp/sse` 请求的 500/503 拦截）。
+3. 关联你的 Git 仓库，或者推送到 Space：
    ```bash
    git remote add hf https://huggingface.co/spaces/<你的用户名>/<Space名称>
    git push hf main --force
    ```
-4. 在 Space 页面点击 **Settings** -> **Variables and secrets**，配置上述环境变量（如 `BEARER_TOKEN`, `TAVILY_API_KEY` 等）。
-5. 容器将自动构建并上线。为了防止免费 Space 在 48 小时无请求后休眠，请在工作流或外部监控（如 UptimeRobot）中，每 10 分钟请求一次 `/health` 接口。
+4. 在 Space 页面点击 **Settings** -> **Variables and secrets**，配置环境变量（如 `BEARER_TOKEN`, `TAVILY_API_KEY` 等）。
+5. 容器将自动使用多阶段构建（仅保留编译后的依赖，剔除了 `build-essential` gcc 等，镜像更轻），并分配正确的 `user` 家目录所有权以防 Crawl4AI 报错。
 
 ### 方案 B：DCD (Docker Compose Deployment) 轻量化本地/私有云部署
 
-适合在自建服务器上跑私有化轻量服务。
-
-1. 在项目根目录，通过 Docker 编译镜像：
+适合在自建服务器上跑私有化服务。
+1. 通过 Docker 编译镜像：
    ```bash
    docker build -t mcp-search-crawl:latest .
    ```
-2. 使用以下命令运行容器：
+2. 运行容器：
    ```bash
    docker run -d \
      -p 7860:7860 \
@@ -161,102 +148,57 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
      mcp-search-crawl:latest
    ```
 
-### 方案 C：Wasmer Edge 部署 (Serverless WebAssembly)
+### 方案 C：Cloudflare Workers / Snippets 边缘代理网关（双向 Token 翻译与自动容灾）
+
+如果你希望拥有一个固定的自定义域名并拥有自动故障转移（主服务器宕机自动路由到备用服务器），请在 Cloudflare 中使用此方案：
+
+1. **CF 匹配规则配置**：
+   在 Cloudflare Rules / Snippets 中，将匹配表达式配置为整个子目录：
+   `(http.host eq "s.khc6.eu.cc")` 或 `(http.host eq "s.khc6.eu.cc" and starts_with(http.request.uri.path, "/mcp/"))`。
+2. **边缘代理代码**：
+   将 `scratch/cf_snippet.js` 的完整内容发布至 Cloudflare。该代码实现了 **双向 Token 翻译适配器**：
+   - 客户端使用老的 `KangHong...` 密钥访问时，若流量打向 Hugging Face（使用新 Token），边缘网关会自动将其翻译成新 Token 顺利通过验证；若降级到备用服务器，则保持老 Token 转发。这实现了**所有老 Agent 零配置修改无缝兼容使用**。
+
+### 方案 D：Wasmer Edge 部署 (Serverless WebAssembly)
 
 得益于 Wasm 优良的沙箱与冷启动特性，本程序已深度适配 Wasmer WASIX 运行时。
-
-1. 本地完成 WASIX wheels 的安装和 site-packages 预编译（工程中已包含）。
-2. 在本地执行部署命令：
+1. 本地执行部署命令：
    ```bash
    wasmer deploy
    ```
-3. 服务会自动打包并发布至 Wasmer Edge 平台。运行环境为 pure python (Wasm 架构)，不包含动态 Chrome 依赖，自动以 Tier 1 (Heuristics) + Tier 3 (Scrapfly/Firecrawl Cloud) 模式无缝运转，完全实现 scale-to-zero（零使用零计费）。
+2. 运行环境为 pure python (Wasm 架构)，不包含动态 Chrome 依赖，自动以 Tier 1 (Heuristics) + Tier 3 (Scrapfly/Firecrawl Cloud) 模式运行。
 
-### 方案 D：Tencent EdgeOne Makers 部署（极速 Serverless & AI 总结内置）
+### 方案 E：Tencent EdgeOne Makers 部署（极速 Serverless & AI 总结内置）
 
-适合在腾讯 EdgeOne 边缘函数上跑无服务器的 full ASGI FastAPI 服务。自带智能 AI 网页内容自动总结功能（底层使用 EdgeOne 每月免费赠送的 50 万 token LLM 资源）。
-
-#### 1. 前置准备与项目关联
-- 确保你已安装 `edgeone` CLI 工具且已执行 `edgeone login` 完成登录。
-- 进入腾讯 EdgeOne Makers 独立部署包目录 `edgeone-mcp/`，执行项目关联命令（关联至你的 EdgeOne 空间项目）：
-  ```bash
-  cd edgeone-mcp/
-  edgeone makers link
-  ```
-- 关联成功后，本地会自动生成 `.edgeone/project.json`。
-
-#### 2. 本地开发调试
-- 启动本地 EdgeOne Makers 开发者服务：
-  ```bash
-  edgeone makers dev
-  ```
-- **核心优化提示 (自动密钥拉取)**：由于我们在目录中放置了 `.env.example`，CLI 在启动时会自动在本地调用腾讯云接口获取 AI Gateway 相关的 `AI_GATEWAY_API_KEY` 和 `AI_GATEWAY_BASE_URL` 环境变量，自动持久化写入 `.env` 并注入给 Python server。无需手动配置模型网关秘钥即可使用 DeepSeek 总结功能！
-- **重要网关代理与 Streaming 绕行路径**：
-  EdgeOne 的本地 dev server 网关代理存在针对 HTTP GET 请求的 `probe+retry` 缓冲机制，这会阻断 SSE（Server-Sent Events）长连接的实时头部返回，导致 MCP 客户端连接卡死超时。
-  **解决方案**：客户端发起 SSE GET 连接时，请在 URL 尾部添加一个斜杠 `/`，即使用 `http://localhost:8088/api/mcp/sse/` 代替 `http://localhost:8088/api/mcp/sse`。这会触发 EdgeOne 网关的 `can_retry` 绕行逻辑，绕过缓冲区，从而获得完美的即时 SSE 流式响应！
-
-#### 3. 云端一键部署
-- 在 `edgeone-mcp/` 目录下执行部署：
-  ```bash
-  edgeone makers deploy
-  ```
-- 平台将完成 requirements 自定义包的动态构建与静态依赖检查，自动在边缘节点发布你的 Python ASGI 实例，并提供专用的 Preview/Preset 访问域名。
+1. 进入 `edgeone-mcp/` 目录，执行项目关联命令：
+   ```bash
+   cd edgeone-mcp/ && edgeone makers link
+   ```
+2. 本地开发调试：
+   ```bash
+   edgeone makers dev
+   ```
+3. 部署发布：
+   ```bash
+   edgeone makers deploy
+   ```
 
 ---
 
 ## 🛠️ 本地开发与测试指南
 
-如果你需要在此项目上继续迭代功能，请按照以下步骤配置你的开发环境：
-
 ### 1. 初始化虚拟环境
 建议使用 Python 3.11 版本进行本地调试：
 ```bash
-# 创建虚拟环境
 python3.11 -m venv .venv311
-
-# 激活虚拟环境
 source .venv311/bin/activate
-
-# 安装所有开发和满血版依赖
 pip install -r requirements-hf.txt
-
-# 安装 Playwright 的 Chromium 依赖
 playwright install chromium
 ```
 
-### 2. 本地启动服务
-在终端配置环境变量后，运行：
-```bash
-export BEARER_TOKEN="test_token"
-export TAVILY_API_KEY="your_key"
-python3 app.py
-```
-默认服务会监听 `0.0.0.0:7860`。
-- **健康检查**: `http://localhost:7860/health`
-- **实时统计面板**: `http://localhost:7860/` (可在浏览器直观看到配置成功的引擎为绿色，以及累积的搜索爬取统计)
-
-### 3. 运行自动化测试套件
+### 2. 运行自动化测试套件
 在提交代码之前，请**务必**执行本地集成测试，以确保级联降级和分词匹配依然完好：
 ```bash
 python3 scratch/run_manual_tests.py
 ```
-如果看到 `🎉 ALL MODULE TESTS PASSED SUCCESSFULLY!` 报告卡，说明代码逻辑完全健康，可以安全部署。
-
----
-
-## 🤝 开发者交接与二次开发提示
-
-当其他开发者接手此项目时，以下细节能帮助他快速干活：
-
-1. **核心逻辑定位**：
-   - MCP 协议定义、接口注册：`app.py` 底部。所有的 MCP Tool 都带有 `@mcp.tool()` 装饰器。
-   - `search_web` 的分流与聚合：位于 `app.py` 中部的 `search_web` 函数和 `run_general_web_search` 函数。
-   - `crawl_page` 与 `crawl_site` 的抓取级联：位于 `app.py` 的 `fetch_page_content` 及其降级链条中。
-
-2. **添加新的搜索引擎/抓取工具**：
-   - 在 `app.py` 中仿照 `search_tavily` 写一个异步的 `search_xxx` 函数，注意捕获所有的 HTTP 异常。
-   - 将其集成进 `run_general_web_search` 或 `search_web` 函数中，并在 `get_active_engines()` 增加状态探测。
-   - 修改仪表盘 HTML 部分，在控制台增加对应组件的绿色点亮逻辑。
-
-3. **测试防爆逻辑**：
-   - 所有的环境变量（如 `ZHIHU_ACCESS_SECRET` 等）在 `app.py` 头部通过 `os.getenv` 读入并缓存到了全局变量。如果编写测试脚本 mock 环境，**不要**在 import 之后直接修改 `os.environ`（这样无效），而是应该像 `scratch/test_zhihu_local.py` 中那样，直接对 `app.ZHIHU_SECRET` 模块级变量进行修改。
+如果看到 `🎉 ALL MODULE TESTS PASSED SUCCESSFULLY!`，说明代码逻辑完全健康。
