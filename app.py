@@ -1543,6 +1543,12 @@ class SimpleAuthMiddleware:
 
         path = scope.get("path", "")
         method = scope.get("method", "")
+        
+        # Always allow HEAD requests without authentication (used by CDN/Load Balancer health checkers)
+        if method == "HEAD":
+            await self.app(scope, receive, send)
+            return
+
         headers = dict(scope.get("headers", []))
 
         # Check if request has a secure session ID header or is a message endpoint
@@ -1572,12 +1578,18 @@ class SimpleAuthMiddleware:
 
             if not token:
                 logger.warning(f"Auth failed (Missing Token): {method} {path}")
+                if method == "GET" and path in ["/mcp", "/mcp/"]:
+                    await self.send_error(send, 200, "Multi-Engine Search & Crawl MCP Server is running.")
+                    return
                 await self.send_error(send, 401, "Missing Authorization Token")
                 return
 
             import secrets
             if not secrets.compare_digest(token, BEARER_TOKEN):
                 logger.warning(f"Auth failed (Invalid Token): {method} {path}")
+                if method == "GET" and path in ["/mcp", "/mcp/"]:
+                    await self.send_error(send, 200, "Multi-Engine Search & Crawl MCP Server is running.")
+                    return
                 await self.send_error(send, 403, "Invalid Bearer Token")
                 return
 
