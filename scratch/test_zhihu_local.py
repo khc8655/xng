@@ -16,15 +16,19 @@ import app
 from app import search_web
 
 # Mock general web search to return consistent dummy results
-async def mock_general_web_search(query):
-    return [
+async def mock_general_web_search(query, engines_list=None):
+    results = [
         {
             "title": f"Mock Web Result for {query}",
             "url": "https://example.com/web",
             "snippet": f"This is a mocked web search result for query: {query}",
             "engine": "DuckDuckGo"
         }
-    ], "DuckDuckGo"
+    ]
+    if engines_list and "zhihu" in engines_list and app.ZHIHU_SECRET:
+        zhihu_res = await app.search_zhihu_impl(query)
+        results.extend(zhihu_res)
+    return results, "DuckDuckGo"
 
 app.run_general_web_search = mock_general_web_search
 

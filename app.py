@@ -227,6 +227,22 @@ def is_chinese_query(query: str) -> bool:
     """Detect if the query contains any Chinese characters."""
     return bool(re.search(r'[\u4e00-\u9fff]', query))
 
+def is_technical_query(query: str) -> bool:
+    """Detect if the query is related to technical, programming, open-source, or bug fixing."""
+    q = query.lower()
+    tech_keywords = [
+        "error", "bug", "fix", "exception", "issue", "crash", "fail", "failed", 
+        "install", "compile", "build", "setup", "configure", "config", "deploy",
+        "api", "code", "programming", "python", "javascript", "golang", "rust",
+        "c++", "java", "github", "git", "npm", "pip", "docker", "k8s", "kubernetes",
+        "database", "sql", "postgresql", "redis", "nginx", "apache", "cloudflare",
+        "aws", "gcp", "azure", "dockerfile", "yaml", "json", "xml", "lxml", 
+        "beautifulsoup", "fastapi", "flask", "django", "spring", "react", "vue",
+        "nextjs", "vite", "nodejs", "typescript", "c#", "swift", "kotlin", "bash",
+        "shell", "linux", "ubuntu", "centos", "debian"
+    ]
+    return any(word in q for word in tech_keywords)
+
 async def search_volcengine(query: str, api_key: str) -> list[dict]:
     """Search the web using Volcengine Custom Search API."""
     url = "https://open.feedcoopapi.com/search_api/web_search"
@@ -393,88 +409,181 @@ async def search_zhihu_impl(query: str, count: int = 5) -> list[dict]:
         logger.error(f"Error querying Zhihu search API: {str(e)}")
         return []
 
-async def run_general_web_search(query: str) -> tuple[list[dict], str]:
+async def search_github_impl(query: str, search_type: str = "repositories") -> list[dict]:
+    """
+    Unified implementation for GitHub search returning raw dictionary list.
+    """
+    token = os.getenv("GITHUB_TOKEN")
+    accept_header = "application/vnd.github.text-match+json" if search_type == "code" else "application/vnd.github+json"
+    headers = {
+        "Accept": accept_header,
+        "User-Agent": "MCP-Search-Server"
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+        
+    url = f"https://api.github.com/search/{search_type}"
+    params = {
+        "q": query,
+        "page": 1,
+        "per_page": 10
+    }
+    
+    try:
+        async with get_http_client(timeout_seconds=15.0) as client:
+            response = await client.get(url, headers=headers, params=params)
+        
+        if response.status_code != 200:
+            logger.warning(f"GitHub search failed with status: {response.status_code}")
+            return []
+            
+        data = response.json()
+        items = data.get("items", [])
+        results = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if search_type == "repositories":
+                desc = item.get("description") or "No description provided."
+                stars = item.get("stargazers_count", 0)
+                results.append({
+                    "title": item.get("full_name", ""),
+                    "url": item.get("html_url", ""),
+                    "snippet": f"Stars: {stars} | {desc}",
+                    "engine": "GitHub",
+                    "publish_date": item.get("updated_at", "")
+                })
+            elif search_type == "issues":
+                body = item.get("body", "") or "No description."
+                state = item.get("state", "")
+                results.append({
+                    "title": item.get("title", ""),
+                    "url": item.get("html_url", ""),
+                    "snippet": f"[{state.upper()}] {body}",
+                    "engine": "GitHub",
+                    "publish_date": item.get("created_at", "")
+                })
+            elif search_type == "code":
+                file_name = item.get("name", "")
+                repo_name = item.get("repository", {}).get("full_name", "")
+                fragments = [m.get("fragment", "") for m in item.get("text_matches", []) if m.get("fragment")]
+                fragment = fragments[0] if fragments else ""
+                results.append({
+                    "title": f"{file_name} in {repo_name}",
+                    "url": item.get("html_url", ""),
+                    "snippet": fragment or f"Path: {item.get('path', '')}",
+                    "engine": "GitHub"
+                })
+        return results
+    except Exception as e:
+        logger.error(f"Error querying GitHub API: {str(e)}")
+        return []
 
-    # 0. Chinese query: run Volcengine + Tavily in parallel for comprehensive coverage
-    #    Volcengine excels at domestic Chinese content (CSDN, 掘金, 知乎...)
-    #    Tavily excels at international/official docs (Google, Cloudflare, AWS...)
-    if is_chinese_query(query):
-        parallel_tasks = []
-        task_names = []
+async def run_general_web_search(query: str, engines_list: list[str] = None) -> tuple[list[dict], str]:
+    """
+    Perform multi-engine search based on the query type (technical vs default) and keys.
+    """
+    tasks = []
+    task_names = []
+    
+    # 3. Explicit engines requested
+    if engines_list:
+        if "volc" in engines_list or "volcengine" in engines_list:
+            if VOLC_SEARCH_API_KEY:
+                tasks.append(search_volcengine(query, VOLC_SEARCH_API_KEY))
+                task_names.append("Volcengine")
+        if "tavily" in engines_list:
+            if TAVILY_API_KEY:
+                tasks.append(search_tavily(query, TAVILY_API_KEY))
+                task_names.append("Tavily")
+        if "exa" in engines_list:
+            if EXA_API_KEY:
+                tasks.append(search_exa(query, EXA_API_KEY))
+                task_names.append("Exa")
+        if "zhihu" in engines_list:
+            if ZHIHU_SECRET:
+                tasks.append(search_zhihu_impl(query))
+                task_names.append("Zhihu")
+        if "github" in engines_list:
+            tasks.append(search_github_impl(query))
+            task_names.append("GitHub")
+        if "duckduckgo" in engines_list or "ddg" in engines_list:
+            tasks.append(search_duckduckgo_raw(query))
+            task_names.append("DuckDuckGo")
+            
+    # Default routing logic if no engines are explicitly specified
+    else:
+        # Detect Zhihu explicit mentions in the query string
+        if "zhihu" in query.lower() or "知乎" in query:
+            if ZHIHU_SECRET:
+                tasks.append(search_zhihu_impl(query))
+                task_names.append("Zhihu")
+        # Detect GitHub explicit mentions in the query string
+        if "github" in query.lower():
+            tasks.append(search_github_impl(query))
+            task_names.append("GitHub")
+
+        # Scene detection:
+        if is_technical_query(query):
+            # 2. Technical, Open-Source, Bug Fix scenarios -> Tavily + Exa
+            logger.info(f"Technical scenario detected for query: '{query}'. Routing to Tavily + Exa.")
+            if TAVILY_API_KEY:
+                tasks.append(search_tavily(query, TAVILY_API_KEY))
+                task_names.append("Tavily")
+            if EXA_API_KEY:
+                tasks.append(search_exa(query, EXA_API_KEY))
+                task_names.append("Exa")
+        else:
+            # 1. Default scenario -> Volcengine + Tavily parallel
+            logger.info(f"Default scenario detected for query: '{query}'. Routing to Volcengine + Tavily.")
+            if VOLC_SEARCH_API_KEY:
+                tasks.append(search_volcengine(query, VOLC_SEARCH_API_KEY))
+                task_names.append("Volcengine")
+            if TAVILY_API_KEY:
+                tasks.append(search_tavily(query, TAVILY_API_KEY))
+                task_names.append("Tavily")
+
+        # Fallback to DuckDuckGo if no API keys are available or no tasks were created
+        if not tasks:
+            logger.info("No API keys available for primary engines. Falling back to DuckDuckGo.")
+            tasks.append(search_duckduckgo_raw(query))
+            task_names.append("DuckDuckGo")
+
+    # Run all tasks in parallel
+    if not tasks:
+        return [], "None"
         
-        if VOLC_SEARCH_API_KEY:
-            parallel_tasks.append(search_volcengine(query, VOLC_SEARCH_API_KEY))
-            task_names.append("Volcengine")
-        if TAVILY_API_KEY:
-            parallel_tasks.append(search_tavily(query, TAVILY_API_KEY))
-            task_names.append("Tavily")
-        
-        if len(parallel_tasks) >= 2:
-            # Both engines available: run in parallel, merge, deduplicate by URL
-            logger.info(f"Chinese query: running {' + '.join(task_names)} in parallel...")
-            gathered = await asyncio.gather(*parallel_tasks, return_exceptions=True)
-            
-            merged = []
-            seen_urls = set()
-            engines_hit = []
-            
-            for i, result in enumerate(gathered):
-                if isinstance(result, Exception):
-                    logger.warning(f"{task_names[i]} failed in parallel search: {result}")
-                    continue
-                if result:
-                    engines_hit.append(task_names[i])
-                    for r in result:
-                        url = r.get("url", "")
-                        if url and url not in seen_urls:
-                            seen_urls.add(url)
-                            merged.append(r)
-            
-            if merged:
-                return merged, " + ".join(engines_hit)
-            # Both failed, fall through to other engines
-            
-        elif len(parallel_tasks) == 1:
-            # Only one engine available for Chinese query
-            try:
-                results = await parallel_tasks[0]
-                if results:
-                    return results, task_names[0]
-            except Exception as e:
-                logger.warning(f"{task_names[0]} search failed: {e}. Falling back...")
-            
-    # 1. Try Tavily (for non-Chinese queries, or if parallel section above was skipped/failed)
-    if TAVILY_API_KEY:
+    logger.info(f"Running search tasks in parallel: {', '.join(task_names)}...")
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    
+    merged_results = []
+    engines_hit = []
+    
+    for i, result in enumerate(gathered):
+        name = task_names[i]
+        if isinstance(result, Exception):
+            logger.warning(f"Engine {name} failed in search pipeline: {result}")
+            continue
+        if result:
+            engines_hit.append(name)
+            for r in result:
+                if not r.get("engine"):
+                    r["engine"] = name
+                merged_results.append(r)
+                
+    # If primary engines returned nothing, fallback to DuckDuckGo if not already queried
+    if not merged_results and "DuckDuckGo" not in task_names:
+        logger.info("Primary search engines returned no results. Falling back to DuckDuckGo.")
         try:
-            logger.info("Attempting search via Tavily...")
-            results = await search_tavily(query, TAVILY_API_KEY)
-            return results, "Tavily"
+            ddg_res = await search_duckduckgo_raw(query)
+            for r in ddg_res:
+                r["engine"] = "DuckDuckGo"
+                merged_results.append(r)
+            engines_hit.append("DuckDuckGo")
         except Exception as e:
-            logger.warning(f"Tavily search failed: {e}. Falling back...")
+            logger.error(f"DuckDuckGo fallback also failed: {e}")
             
-    # 2. Try Exa
-    if EXA_API_KEY:
-        try:
-            logger.info("Attempting search via Exa...")
-            results = await search_exa(query, EXA_API_KEY)
-            return results, "Exa"
-        except Exception as e:
-            logger.warning(f"Exa search failed: {e}. Falling back...")
-            
-    # 3. Try Volcengine fallback for non-Chinese queries
-    if VOLC_SEARCH_API_KEY:
-        try:
-            logger.info("Attempting search via Volcengine (Fallback)...")
-            results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
-            if results:
-                return results, "Volcengine"
-        except Exception as e:
-            logger.warning(f"Volcengine fallback search failed: {e}. Falling back...")
-            
-    # 4. Fallback to DuckDuckGo
-    logger.info("Executing DuckDuckGo fallback raw search.")
-    results = await search_duckduckgo_raw(query)
-    return results, "DuckDuckGo"
+    return merged_results, " + ".join(engines_hit)
 
 @mcp.tool()
 async def search_github(
@@ -621,6 +730,111 @@ async def search_zhihu(query: str, count: int = 5) -> str:
         return f"Error executing Zhihu search: {str(e)}"
 
 # 3. Define Unified search tool with failover and caching
+def post_process_search_results(results: list[dict], query: str) -> str:
+    """
+    Apply 4 post-processing rules to search results:
+    1. Field standardization (Title / URL / Snippet / Source Label / Publish Date)
+    2. URL deduplication (Keep longest snippet, merge source labels)
+    3. Lightweight ranking (Sort by keyword match score + source weight)
+    4. Length truncation (Snippet <= 150 chars, max 10 results)
+    """
+    if not results:
+        return "No search results found."
+
+    # Rule 2: URL Deduplication (Normalize URLs first)
+    deduped = {}
+    for item in results:
+        url = item.get("url", "").strip()
+        if not url:
+            continue
+        
+        # Simple URL normalization (remove trailing slash)
+        norm_url = url.rstrip("/")
+        snippet = item.get("snippet", "") or ""
+        
+        if norm_url not in deduped:
+            deduped[norm_url] = {
+                "title": item.get("title", "").strip() or "No Title",
+                "url": url,
+                "snippet": snippet,
+                "sources": {item.get("engine", "Unknown")},
+                "publish_date": item.get("publish_date", "") or ""
+            }
+        else:
+            existing = deduped[norm_url]
+            existing["sources"].add(item.get("engine", "Unknown"))
+            # Keep the longer snippet
+            if len(snippet) > len(existing["snippet"]):
+                existing["snippet"] = snippet
+            # Capture publish date if not present
+            if not existing["publish_date"] and item.get("publish_date"):
+                existing["publish_date"] = item.get("publish_date")
+
+    # Prepare list for ranking
+    query_words = [w.lower() for w in re.findall(r'\w+', query) if len(w) > 1]
+    
+    # Engine weight map
+    engine_weights = {
+        "Volcengine": 5.0,
+        "Tavily": 4.5,
+        "Exa": 4.0,
+        "Zhihu": 3.5,
+        "GitHub": 4.5,
+        "DuckDuckGo": 2.0,
+    }
+
+    scored_items = []
+    for norm_url, item in deduped.items():
+        snippet = item["snippet"]
+        title = item["title"]
+        
+        # Rule 3: Lightweight ranking (keyword match count + source weight)
+        match_count = 0
+        text_to_search = (title + " " + snippet).lower()
+        for word in query_words:
+            match_count += text_to_search.count(word)
+            
+        # Get maximum source weight
+        max_source_weight = max([engine_weights.get(src, 1.0) for src in item["sources"]])
+        for src in item["sources"]:
+            for key, weight in engine_weights.items():
+                if key in src and weight > max_source_weight:
+                    max_source_weight = weight
+            
+        score = (match_count * 2.0) + max_source_weight
+        scored_items.append((score, item))
+
+    # Sort descending by score
+    scored_items.sort(key=lambda x: x[0], reverse=True)
+    top_items = [item for _, item in scored_items[:10]]
+
+    # Rule 4: Length truncation and formatting
+    formatted_lines = []
+    for idx, item in enumerate(top_items):
+        title = item["title"]
+        url = item["url"]
+        
+        # Truncate snippet to 150 chars
+        raw_snippet = item["snippet"].replace("\n", " ").strip()
+        raw_snippet = re.sub(r'\s+', ' ', raw_snippet)
+        if len(raw_snippet) > 150:
+            snippet = raw_snippet[:147] + "..."
+        else:
+            snippet = raw_snippet
+            
+        sources_str = ", ".join(sorted(item["sources"]))
+        publish_date = item["publish_date"]
+        date_str = f" | Date: {publish_date}" if publish_date else ""
+        
+        # Rule 1: Field standardization format: Title / URL / Snippet / Source Label / Publish Date
+        formatted_lines.append(
+            f"{idx+1}. **[{title}]({url})**\n"
+            f"   - Snippet: {snippet}\n"
+            f"   - Source: {sources_str}{date_str}"
+        )
+
+    return "\n\n".join(formatted_lines)
+
 @mcp.tool()
 async def search_web(query: str, engines: str | None = None, page: int = 1) -> str:
     """
@@ -628,19 +842,13 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
     
     CRITICAL AGENT INSTRUCTIONS FOR HIGH EFFICIENCY:
     - **Search First**: Use this tool to look up current events, programming APIs, documentation, or factual queries.
-    - **Formulate Clean Queries**: For best results, use concise, keyword-focused, space-separated terms (e.g., "FastAPI CORS middleware configuration") rather than conversational sentences or questions.
-    - **Evaluate Snippets**: Read the returned search snippets carefully; they often contain the answer directly, or point to a target URL that you can crawl.
-    - **Language Strategy**: Use English keywords for technical, programming, or documentation searches. Use Chinese keywords for domestic news or local topics.
-    - **Specific URL**: If you already have a target URL, use `crawl_page` directly instead of searching.
-    - **No Hallucinations**: Only state facts found directly in the search snippets or crawled content.
-    - **Volcengine Search**: Prioritized for Chinese queries to fetch local, high-quality, authoritative results.
+    - **Formulate Clean Queries**: For best results, use concise, keyword-focused, space-separated terms rather than conversational sentences.
+    - **Evaluate Snippets**: Read the returned search snippets carefully.
     
     Args:
         query: Core search keywords (e.g., "Python 3.12 syntax changes"). Avoid conversational questions.
         engines: Optional. Comma-separated list of engines ("Tavily", "Exa", "Zhihu", "Volcengine"). 
-                 Use "Zhihu" for Chinese forum opinions. Use "Volcengine" for domestic Chinese search.
-                 Use "hybrid" or "all" to search general web and Zhihu in parallel. 
-                 Leave as null/None to use available defaults (highly recommended for general queries).
+                 Use "hybrid" or "all" to search general web and Zhihu in parallel.
         page: Optional. Page number for pagination. Defaults to 1.
     """
     global search_count
@@ -654,90 +862,38 @@ async def search_web(query: str, engines: str | None = None, page: int = 1) -> s
         return cached
 
     # Parse engines option
-    engines_list = [e.strip().lower() for e in engines.split(",")] if engines else []
+    engines_list = []
+    if engines:
+        for e in engines.split(","):
+            e_clean = e.strip().lower()
+            if e_clean == "hybrid" or e_clean == "all":
+                engines_list.extend(["volc", "tavily", "zhihu"])
+            else:
+                engines_list.append(e_clean)
 
-    web_results = []
-    zhihu_results = []
-    engine_used = None
+    # Validate explicit engines configuration (only fail if user explicitly requested it singly and key is missing)
+    if engines:
+        for eng in engines.split(","):
+            eng_clean = eng.strip().lower()
+            if eng_clean == "zhihu" and not ZHIHU_SECRET:
+                if len(engines.split(",")) == 1:
+                    return "Error: Zhihu search was requested, but ZHIHU_ACCESS_SECRET or ZHIHU_API_KEY is not configured in environment variables."
+            elif eng_clean == "tavily" and not TAVILY_API_KEY:
+                if len(engines.split(",")) == 1:
+                    return "Error: Tavily search was requested, but TAVILY_API_KEY is not configured in environment variables."
+            elif eng_clean == "exa" and not EXA_API_KEY:
+                if len(engines.split(",")) == 1:
+                    return "Error: Exa search was requested, but EXA_API_KEY is not configured in environment variables."
+            elif (eng_clean == "volc" or eng_clean == "volcengine") and not VOLC_SEARCH_API_KEY:
+                if len(engines.split(",")) == 1:
+                    return "Error: Volcengine search was requested, but VOLC_SEARCH_API_KEY is not configured in environment variables."
+
+    # Fetch raw merged results
+    merged_results, engine_used = await run_general_web_search(query, engines_list)
     
-    # 1. Check if only "zhihu" is requested
-    if len(engines_list) == 1 and engines_list[0] == "zhihu":
-        if not ZHIHU_SECRET:
-            return "Error: Zhihu search was requested, but ZHIHU_ACCESS_SECRET or ZHIHU_API_KEY is not configured in environment variables."
-        zhihu_results = await search_zhihu_impl(query)
-        engine_used = "Zhihu"
-        
-    # 2. Check if hybrid / all / both requested
-    elif "hybrid" in engines_list or "all" in engines_list or ("zhihu" in engines_list and len(engines_list) > 1):
-        web_task = asyncio.create_task(run_general_web_search(query))
-        
-        if ZHIHU_SECRET:
-            zhihu_task = asyncio.create_task(search_zhihu_impl(query))
-            web_res_tuple, zhihu_res = await asyncio.gather(web_task, zhihu_task)
-            web_results, engine_used = web_res_tuple
-            zhihu_results = zhihu_res
-        else:
-            logger.warning("Zhihu is requested in hybrid search, but ZHIHU_ACCESS_SECRET/ZHIHU_API_KEY is not set. Defaulting to general search only.")
-            web_results, engine_used = await web_task
-        
-    # 3. Else, default web search (with optional forced single engine)
-    else:
-        
-        forced_engine = None
-        for eng in engines_list:
-            if eng in ["tavily", "exa", "duckduckgo", "volcengine", "volc"]:
-                forced_engine = eng
-                break
-                
-        if forced_engine == "tavily" and TAVILY_API_KEY:
-            try:
-                web_results = await search_tavily(query, TAVILY_API_KEY)
-                engine_used = "Tavily"
-            except Exception as e:
-                return f"Error: Forced Tavily search failed: {e}"
-        elif forced_engine == "exa" and EXA_API_KEY:
-            try:
-                web_results = await search_exa(query, EXA_API_KEY)
-                engine_used = "Exa"
-            except Exception as e:
-                return f"Error: Forced Exa search failed: {e}"
-        elif (forced_engine == "volcengine" or forced_engine == "volc") and VOLC_SEARCH_API_KEY:
-            try:
-                web_results = await search_volcengine(query, VOLC_SEARCH_API_KEY)
-                engine_used = "Volcengine"
-            except Exception as e:
-                return f"Error: Forced Volcengine search failed: {e}"
-        elif forced_engine == "duckduckgo":
-            web_results = await search_duckduckgo_raw(query)
-            engine_used = "DuckDuckGo"
-        else:
-            # Fallback priority list
-            web_res_tuple, engine_used = await run_general_web_search(query)
-            web_results = web_res_tuple
-
-    # Merge results
-    all_items = []
-    if zhihu_results:
-        all_items.extend(zhihu_results)
-    if web_results:
-        all_items.extend(web_results)
-        
-    if not all_items:
-        return "No search results found."
-        
-    formatted_results = []
-    for idx, r in enumerate(all_items[:10]):
-        title = r.get("title", "No Title")
-        link = r.get("url", "#")
-        snippet = r.get("snippet", "No description.")
-        engine = r.get("engine", engine_used)
-        formatted_results.append(
-            f"{idx+1}. **[{title}]({link})**\n"
-            f"   *Source*: {engine}\n"
-            f"   *Snippet*: {snippet}\n"
-        )
-        
-    result_str = "\n".join(formatted_results)
+    # Process results through the 4-step pipeline
+    result_str = post_process_search_results(merged_results, query)
+    
     search_cache.set(cache_key, result_str)
     return result_str
 
