@@ -51,19 +51,20 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 - **知乎深度检索**：支持 `engines="zhihu"` 专属搜索，或 `engines="hybrid"` 混合搜索模式，并发拉取知乎的深度讨论与专业问答，并在输出中展示点赞数和评论数。
 
 ### 2. 智能分层网页抓取器 (`crawl_page` / `crawl_site`)
-- **第一层：本地 Heuristic Readability (零内存开销)**
-  通过标准 HTTP 客户端拉取静态 HTML，使用类似 Readability.js 的评分算法，剥离导航栏、页脚、侧边栏和广告，提取核心文章内容并转为 Markdown。
+- **第一层：本地 Heuristic Readability (零内存开销，低配服务器首选 ⭐)**
+  通过标准 HTTP 客户端拉取静态 HTML，使用内置的 Python 启发式评分算法，剥离导航栏、页脚、侧边栏和广告，提取核心文章内容并转为 Markdown。此过程**无需任何浏览器环境，秒级响应，几乎零内存消耗**。
 - **第二层：本地 Crawl4AI 动态渲染 (中内存开销)**
   如果静态抓取失败、被防爬盾拦截或网页为单页应用（SPA），自动级联至本地 Crawl4AI。它以 `text_mode=True`（不加载图片、字体和样式）和 `light_mode=True` 启动无头 Chromium 浏览器，执行 JS 渲染，节省 70% 内存和带宽。
 - **第三层：Firecrawl / Scrapfly 云端越盾 (高可靠付费降级)**
   如果本地渲染仍被 Cloudflare、CAPTCHA 等深度反爬盾阻断，自动路由至 Firecrawl Scrape API，最终降级至 Scrapfly 住宅代理云端浏览器，确保 100% 网页可达性。
-- **章节递归爬虫 (`crawl_site`)**
-  支持对整个文档章节或 wiki 进行宽度优先（BFS）递归爬取。内置 **`max_depth` 深度控制（默认 2）**、**`max_pages` 页面控制（默认 10）**、**链接 Prefix 域名锁定**，并加入了并发限制（批次大小 3）与 300ms 礼貌延迟，防止因递归抓取导致整个网站被封禁或 LLM 上下文爆炸。
 
-### 3. 高性能内存缓存 (`TTLCache`)
-- 包含 10 分钟 TTL 过期策略。
-- 引入 **URL 标准化** 机制（忽略尾部斜杠，对 Query 参数按字母排序），极大提升缓存命中率。
-- 带有 **LRU（最近最少使用）淘汰机制** 及最大容量上限（Search 300 条，Crawl 150 条），防止多用户并发使用导致内存泄露。
+### 3. 🚨 低内存自动防护机制 (Low-Memory Auto Protection)
+为了防止在低配置云服务器（如 Docker Compose 容器、低配 VPS、或 Serverless 环境）中由于 Chromium 浏览器运行时瞬间吃满内存导致系统被 **OOM Kill (内存溢出强杀)**，服务器内置了双重保护机制：
+* **自动内存检测**：系统启动时，会自动调用 `psutil` 检测宿主机总内存。**如果系统总内存 < 1.5 GB，会自动强制停用本地 Crawl4AI 浏览器引擎**，将所有本地网页抓取请求自动路由至轻量级的第一层 Heuristic 静态解析，或降级到云端 API。
+* **手动环境变量强制停用**：你可以在启动时配置环境变量 `DISABLE_LOCAL_BROWSER=true`，完全禁用本地浏览器，让服务器在极轻量的状态下（约 50MB 内存占用）完美运行。
+
+### 4. 章节递归爬虫 (`crawl_site`)
+支持对整个文档章节或 wiki 进行宽度优先（BFS）递归爬取。内置 **`max_depth` 深度控制（默认 2）**、**`max_pages` 页面控制（默认 10）**、**链接 Prefix 域名锁定**，并加入了并发限制（批次大小 3）与 300ms 礼貌延迟，防止因递归抓取导致整个网站被封禁或 LLM 上下文爆炸。
 
 ---
 
@@ -111,7 +112,7 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 | :--- | :--- | :--- |
 | `FIRECRAWL_API_KEY` | Firecrawl 网页爬取与转 Markdown API Key | [Firecrawl 官网](https://www.firecrawl.dev/) |
 | `SCRAPFLY_API_KEY` | Scrapfly 住宅代理越盾爬虫 API Key | [Scrapfly 官网](https://scrapfly.io/) |
-| `DISABLE_LOCAL_BROWSER` | 设置为 `true` 时，强制停用本地 Crawl4AI 动态浏览器 | 低配机器优化 |
+| `DISABLE_LOCAL_BROWSER` | 设置为 `true` 或 `1` 时，强制停用本地 Crawl4AI 动态浏览器，全面启用轻量级启发式静态抓取（适合低配服务器）。 | 低配机器优化 |
 
 ---
 
@@ -119,7 +120,7 @@ Tavily  Exa  DuckDuckGo (Free)                            Heuristic Crawl4AI   F
 
 ### 方案 A：Hugging Face Spaces 部署（公开空间最佳实践，推荐 ⭐）
 
-本项目原生支持 Hugging Face Spaces Docker 部署，在多端 AI Agents 中可作为持久的云端 MCP 服务。
+本项目原生支持 Hugging Face Spaces Docker 部署，在多端 AI Agents 中可作为持久 the 云端 MCP 服务。
 
 1. 在 Hugging Face 上创建一个 **New Space**，SDK 选择 **Docker**，模板选择 **Blank**。
 2. 将该 Space 的 **Visibility 设为 Public**（为了方便 GitHub 保活监控以及规避私有状态下 HF 网关对 `/mcp/sse` 请求的 500/503 拦截）。
