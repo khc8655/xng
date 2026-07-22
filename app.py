@@ -1694,7 +1694,7 @@ app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
 class SimpleAuthMiddleware:
     """
     A robust ASGI middleware handling CORS, Bearer Authentication, and routing
-    for both Streamable HTTP (POST/GET /mcp) and SSE (GET /mcp/sse) transports.
+    for both Streamable HTTP (POST/GET /mcp, /mcp/sse) and SSE (GET /mcp/sse, POST /messages/) transports.
     """
     def __init__(self, app):
         self.app = app
@@ -1707,6 +1707,7 @@ class SimpleAuthMiddleware:
             return
 
         raw_path = scope.get("path", "")
+        # Remove trailing slashes for path matching except root
         path = raw_path.rstrip("/") if raw_path != "/" else "/"
         method = scope.get("method", "").upper()
         
@@ -1716,19 +1717,20 @@ class SimpleAuthMiddleware:
             return
 
         # 2. Universal HEAD probing handling for health/availability checks
-        if method == "HEAD" and path.startswith("/mcp"):
+        if method == "HEAD" and (path.startswith("/mcp") or path.startswith("/messages") or path == "/sse"):
             await self.send_cors_response(send, 200, b"")
             return
 
         headers = dict(scope.get("headers", []))
         
-        # Extract session ID if present
+        # Identify secure session paths (SSE messages & active streamable sessions)
         has_session_header = (b"mcp-session-id" in headers)
-        is_sse_message_path = path.startswith("/mcp/messages")
-        has_secure_session = has_session_header or is_sse_message_path
+        is_sse_messages_path = path.startswith("/messages") or path.startswith("/mcp/messages")
+        has_secure_session = has_session_header or is_sse_messages_path
 
-        # 3. Token Authentication for /mcp routes
-        if path.startswith("/mcp") and not has_secure_session and BEARER_TOKEN:
+        # 3. Token Authentication for /mcp, /messages, and SSE routes
+        needs_auth = (path.startswith("/mcp") or path.startswith("/messages") or path == "/sse")
+        if needs_auth and not has_secure_session and BEARER_TOKEN:
             from urllib.parse import parse_qs
             query_string = scope.get("query_string", b"").decode("utf-8")
             token = None
@@ -1784,23 +1786,23 @@ class SimpleAuthMiddleware:
             new_headers.append((b"accept", b"application/json, text/event-stream, */*"))
             scope["headers"] = new_headers
 
-        # 5. Route Handling for Streamable HTTP & SSE Transports
-        # 5a. SSE GET stream connection (e.g. GET /mcp/sse or GET /mcp/sse/)
-        if method == "GET" and (path == "/mcp/sse" or path == "/mcp/sse/"):
+        # 5. Route Handling
+        # 5a. SSE Message Endpoint (matches BOTH /messages AND /mcp/messages)
+        # FastMCP sse_app expects path to be /messages/ (with trailing slash)
+        if is_sse_messages_path:
+            scope["path"] = "/messages/"
+            await self.sse_app(scope, receive, send)
+            return
+
+        # 5b. SSE Connect Endpoint (matches GET /mcp/sse, GET /mcp/sse/, GET /sse)
+        if method == "GET" and (path in ["/mcp/sse", "/sse"]):
             scope["path"] = "/sse"
             await self.sse_app(scope, receive, send)
             return
 
-        # 5b. SSE POST message distribution (e.g. POST /mcp/messages)
-        if path.startswith("/mcp/messages"):
-            sub_path = path[len("/mcp/messages"):]
-            scope["path"] = "/messages" + sub_path
-            await self.sse_app(scope, receive, send)
-            return
-
-        # 5c. Streamable HTTP POST / GET / DELETE (e.g. POST /mcp, POST /mcp/)
-        if path in ["/mcp", ""]:
-            if method in ["POST", "DELETE"] or (method == "GET" and has_session_header):
+        # 5c. Streamable HTTP Transport (POST / GET / DELETE on /mcp, /mcp/sse, or /)
+        if path in ["/mcp", "/mcp/sse", ""]:
+            if method in ["POST", "DELETE", "PUT"] or (method == "GET" and has_session_header):
                 scope["path"] = "/mcp"
                 await self.streamable_app(scope, receive, send)
                 return
