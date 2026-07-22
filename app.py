@@ -1693,108 +1693,146 @@ app = FastAPI(title="Multi-Engine Search & Crawl MCP Server", lifespan=lifespan)
 
 class SimpleAuthMiddleware:
     """
-    A cleaner ASGI middleware that handles Bearer token authentication
-    for the /mcp routes and routes Streamable HTTP requests to the proper app.
+    A robust ASGI middleware handling CORS, Bearer Authentication, and routing
+    for both Streamable HTTP (POST/GET /mcp) and SSE (GET /mcp/sse) transports.
     """
     def __init__(self, app):
         self.app = app
+        self.streamable_app = mcp.streamable_http_app()
+        self.sse_app = mcp.sse_app()
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        path = scope.get("path", "")
-        method = scope.get("method", "")
+        raw_path = scope.get("path", "")
+        path = raw_path.rstrip("/") if raw_path != "/" else "/"
+        method = scope.get("method", "").upper()
         
-        # Always allow HEAD requests without authentication (used by CDN/Load Balancer health checkers)
-        if method == "HEAD":
-            await self.app(scope, receive, send)
+        # 1. Universal CORS Preflight Handling (OPTIONS)
+        if method == "OPTIONS":
+            await self.send_cors_response(send, 204, b"")
+            return
+
+        # 2. Universal HEAD probing handling for health/availability checks
+        if method == "HEAD" and path.startswith("/mcp"):
+            await self.send_cors_response(send, 200, b"")
             return
 
         headers = dict(scope.get("headers", []))
+        
+        # Extract session ID if present
+        has_session_header = (b"mcp-session-id" in headers)
+        is_sse_message_path = path.startswith("/mcp/messages")
+        has_secure_session = has_session_header or is_sse_message_path
 
-        # Check if request has a secure session ID header or is a message endpoint
-        has_secure_session = (b"mcp-session-id" in headers) or path.startswith("/mcp/messages")
-
-        # Only protect /mcp routes, but exclude paths holding a secure session
+        # 3. Token Authentication for /mcp routes
         if path.startswith("/mcp") and not has_secure_session and BEARER_TOKEN:
             from urllib.parse import parse_qs
             query_string = scope.get("query_string", b"").decode("utf-8")
             token = None
             
-            # Check X-MCP-Token header (forwarded by proxy CDN to avoid auth header collision)
+            # Check X-MCP-Token header
             mcp_token_bytes = headers.get(b"x-mcp-token", b"")
             if mcp_token_bytes:
-                mcp_token = mcp_token_bytes.decode("utf-8")
+                mcp_token = mcp_token_bytes.decode("utf-8").strip()
                 parts = mcp_token.split()
-                if len(parts) == 2 and parts[0].lower() == "bearer":
-                    token = parts[1]
-                else:
-                    token = mcp_token
+                token = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else mcp_token
             
             # Check Authorization header
             if not token:
-                auth_header_bytes = headers.get(b"authorization", b"")
-                if auth_header_bytes:
-                    auth_header = auth_header_bytes.decode("utf-8")
-                    parts = auth_header.split()
-                    if len(parts) == 2 and parts[0].lower() == "bearer":
-                        token = parts[1]
-                    else:
-                        token = auth_header
+                auth_bytes = headers.get(b"authorization", b"")
+                if auth_bytes:
+                    auth_str = auth_bytes.decode("utf-8").strip()
+                    parts = auth_str.split()
+                    token = parts[1] if len(parts) == 2 and parts[0].lower() == "bearer" else auth_str
             
-            # Check query param
+            # Check Query String (?token=xxx or ?authorization=xxx)
             if not token and query_string:
                 params = parse_qs(query_string)
                 if "token" in params:
                     token = params["token"][0]
+                elif "authorization" in params:
+                    token = params["authorization"][0]
 
             if not token:
                 logger.warning(f"Auth failed (Missing Token): {method} {path}")
-                if method == "GET" and path in ["/mcp", "/mcp/"]:
-                    await self.send_error(send, 200, "Multi-Engine Search & Crawl MCP Server is running.")
+                if method == "GET" and path in ["/mcp", ""]:
+                    info_body = json.dumps({
+                        "status": "online",
+                        "message": "Multi-Engine Search & Crawl MCP Server is running.",
+                        "transport": ["sse", "streamable-http"]
+                    }).encode("utf-8")
+                    await self.send_cors_response(send, 200, info_body, content_type=b"application/json")
                     return
-                await self.send_error(send, 401, "Missing Authorization Token")
+                err_body = json.dumps({"detail": "Missing Authorization Token"}).encode("utf-8")
+                await self.send_cors_response(send, 401, err_body, content_type=b"application/json")
                 return
 
             import secrets
             if not secrets.compare_digest(token, BEARER_TOKEN):
                 logger.warning(f"Auth failed (Invalid Token): {method} {path}")
-                if method == "GET" and path in ["/mcp", "/mcp/"]:
-                    await self.send_error(send, 200, "Multi-Engine Search & Crawl MCP Server is running.")
-                    return
-                await self.send_error(send, 403, "Invalid Bearer Token")
+                err_body = json.dumps({"detail": "Invalid Bearer Token"}).encode("utf-8")
+                await self.send_cors_response(send, 403, err_body, content_type=b"application/json")
                 return
 
-        # Route Streamable HTTP requests to the dedicated application
-        is_streamable_http = False
-        if path in ["/mcp", "/mcp/", "/mcp/sse", "/mcp/sse/"]:
-            if method in ["POST", "DELETE"] or (method == "GET" and b"mcp-session-id" in headers):
-                is_streamable_http = True
+        # 4. Normalize Accept header for Streamable HTTP requests (Prevents 406 Not Acceptable)
+        accept_header_val = headers.get(b"accept", b"")
+        if not accept_header_val or accept_header_val == b"*/*":
+            new_headers = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"accept"]
+            new_headers.append((b"accept", b"application/json, text/event-stream, */*"))
+            scope["headers"] = new_headers
 
-        if is_streamable_http:
-            scope["path"] = "/mcp"
-            await streamable_http_asgi_app(scope, receive, send)
+        # 5. Route Handling for Streamable HTTP & SSE Transports
+        # 5a. SSE GET stream connection (e.g. GET /mcp/sse or GET /mcp/sse/)
+        if method == "GET" and (path == "/mcp/sse" or path == "/mcp/sse/"):
+            scope["path"] = "/sse"
+            await self.sse_app(scope, receive, send)
             return
 
-        # Pass through to the underlying FastAPI app and FastMCP mounts
+        # 5b. SSE POST message distribution (e.g. POST /mcp/messages)
+        if path.startswith("/mcp/messages"):
+            sub_path = path[len("/mcp/messages"):]
+            scope["path"] = "/messages" + sub_path
+            await self.sse_app(scope, receive, send)
+            return
+
+        # 5c. Streamable HTTP POST / GET / DELETE (e.g. POST /mcp, POST /mcp/)
+        if path in ["/mcp", ""]:
+            if method in ["POST", "DELETE"] or (method == "GET" and has_session_header):
+                scope["path"] = "/mcp"
+                await self.streamable_app(scope, receive, send)
+                return
+            elif method == "GET":
+                info_body = json.dumps({
+                    "status": "online",
+                    "message": "Multi-Engine Search & Crawl MCP Server is running.",
+                    "transport": ["sse", "streamable-http"]
+                }).encode("utf-8")
+                await self.send_cors_response(send, 200, info_body, content_type=b"application/json")
+                return
+
+        # Fall through to FastAPI app
         await self.app(scope, receive, send)
 
-    async def send_error(self, send, status_code, message):
-        import json
-        response_body = json.dumps({"detail": message}).encode("utf-8")
+    async def send_cors_response(self, send, status_code, body, content_type=b"text/plain"):
+        cors_headers = [
+            (b"access-control-allow-origin", b"*"),
+            (b"access-control-allow-methods", b"GET, POST, PUT, DELETE, OPTIONS, HEAD"),
+            (b"access-control-allow-headers", b"Authorization, Content-Type, X-MCP-Token, mcp-session-id, Accept, Last-Event-ID"),
+            (b"access-control-expose-headers", b"mcp-session-id, Content-Type"),
+            (b"content-type", content_type),
+            (b"content-length", str(len(body)).encode("utf-8")),
+        ]
         await send({
             "type": "http.response.start",
             "status": status_code,
-            "headers": [
-                (b"content-type", b"application/json"),
-                (b"content-length", str(len(response_body)).encode("utf-8")),
-            ]
+            "headers": cors_headers
         })
         await send({
             "type": "http.response.body",
-            "body": response_body,
+            "body": body,
         })
 
 app.add_middleware(SimpleAuthMiddleware)
