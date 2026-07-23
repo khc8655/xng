@@ -585,7 +585,6 @@ async def run_general_web_search(query: str, engines_list: list[str] = None) -> 
             
     return merged_results, " + ".join(engines_hit)
 
-@mcp.tool()
 async def search_github(
     query: str,
     search_type: str = "repositories",
@@ -695,8 +694,7 @@ async def search_github(
     except Exception as e:
         return f"Error executing GitHub search: {str(e)}"
 
-@mcp.tool()
-async def search_zhihu(query: str, count: int = 5) -> str:
+async def search_zhihu_legacy(query: str, count: int = 5) -> str:
     """
     Search Zhihu (知乎) - the premier Chinese high-quality Q&A, technical articles, and knowledge sharing community.
     
@@ -732,103 +730,83 @@ async def search_zhihu(query: str, count: int = 5) -> str:
 # 3. Define Unified search tool with failover and caching
 def post_process_search_results(results: list[dict], query: str) -> str:
     """
-    Apply 4 post-processing rules to search results:
-    1. Field standardization (Title / URL / Snippet / Source Label / Publish Date)
-    2. URL deduplication (Keep longest snippet, merge source labels)
-    3. Lightweight ranking (Sort by keyword match score + source weight)
-    4. Length truncation (Snippet <= 150 chars, max 10 results)
+    Apply SearXNG-style metasearch post-processing rules:
+    1. URL normalization & deduplication
+    2. SearXNG Reciprocal Rank Scoring: Score = sum((occurrences * weight) / position)
+    3. Truncate snippets to 150 chars max, format top 10 as clean Markdown.
     """
     if not results:
         return "No search results found."
 
-    # Rule 2: URL Deduplication (Normalize URLs first)
+    engine_weights = {
+        "Volcengine": 1.5,
+        "Tavily": 1.5,
+        "Exa": 1.2,
+        "GitHub": 1.2,
+        "Zhihu": 1.2,
+        "DuckDuckGo": 1.0,
+    }
+
+    import re
     deduped = {}
     for item in results:
         url = item.get("url", "").strip()
         if not url:
             continue
         
-        # Simple URL normalization (remove trailing slash)
-        norm_url = url.rstrip("/")
-        snippet = item.get("snippet", "") or ""
+        # Normalize URL: strip http/https, trailing slash, utm params
+        norm_url = re.sub(r'^https?://', '', url).rstrip('/')
+        norm_url = re.sub(r'[\?&]utm_[^&]+', '', norm_url)
+        
+        engine_name = item.get("engine", "DuckDuckGo")
+        pos = item.get("position", 10)
         
         if norm_url not in deduped:
             deduped[norm_url] = {
                 "title": item.get("title", "").strip() or "No Title",
                 "url": url,
-                "snippet": snippet,
-                "sources": {item.get("engine", "Unknown")},
+                "snippet": item.get("snippet", "") or "",
+                "sources": {engine_name},
+                "positions": [(engine_name, pos)],
                 "publish_date": item.get("publish_date", "") or ""
             }
         else:
             existing = deduped[norm_url]
-            existing["sources"].add(item.get("engine", "Unknown"))
-            # Keep the longer snippet
-            if len(snippet) > len(existing["snippet"]):
-                existing["snippet"] = snippet
-            # Capture publish date if not present
+            existing["sources"].add(engine_name)
+            existing["positions"].append((engine_name, pos))
+            if len(item.get("snippet", "")) > len(existing["snippet"]):
+                existing["snippet"] = item.get("snippet", "")
             if not existing["publish_date"] and item.get("publish_date"):
                 existing["publish_date"] = item.get("publish_date")
 
-    # Prepare list for ranking
-    query_words = [w.lower() for w in re.findall(r'\w+', query) if len(w) > 1]
-    
-    # Engine weight map
-    engine_weights = {
-        "Volcengine": 5.0,
-        "Tavily": 4.5,
-        "Exa": 4.0,
-        "Zhihu": 3.5,
-        "GitHub": 4.5,
-        "DuckDuckGo": 2.0,
-    }
-
+    # Calculate SearXNG Reciprocal Rank Score
     scored_items = []
     for norm_url, item in deduped.items():
-        snippet = item["snippet"]
-        title = item["title"]
-        
-        # Rule 3: Lightweight ranking (keyword match count + source weight)
-        match_count = 0
-        text_to_search = (title + " " + snippet).lower()
-        for word in query_words:
-            match_count += text_to_search.count(word)
+        occurrences = len(item["sources"])
+        score = 0.0
+        for engine_name, pos in item["positions"]:
+            weight = engine_weights.get(engine_name, 1.0)
+            score += (occurrences * weight) / max(1, pos)
             
-        # Get maximum source weight
-        max_source_weight = max([engine_weights.get(src, 1.0) for src in item["sources"]])
-        for src in item["sources"]:
-            for key, weight in engine_weights.items():
-                if key in src and weight > max_source_weight:
-                    max_source_weight = weight
-            
-        score = (match_count * 2.0) + max_source_weight
         scored_items.append((score, item))
 
-    # Sort descending by score
     scored_items.sort(key=lambda x: x[0], reverse=True)
     top_items = [item for _, item in scored_items[:10]]
 
-    # Rule 4: Length truncation and formatting
     formatted_lines = []
-    for idx, item in enumerate(top_items):
+    for idx, item in enumerate(top_items, 1):
         title = item["title"]
         url = item["url"]
         
-        # Truncate snippet to 150 chars
         raw_snippet = item["snippet"].replace("\n", " ").strip()
         raw_snippet = re.sub(r'\s+', ' ', raw_snippet)
-        if len(raw_snippet) > 150:
-            snippet = raw_snippet[:147] + "..."
-        else:
-            snippet = raw_snippet
+        snippet = (raw_snippet[:147] + "...") if len(raw_snippet) > 150 else raw_snippet
             
         sources_str = ", ".join(sorted(item["sources"]))
-        publish_date = item["publish_date"]
-        date_str = f" | Date: {publish_date}" if publish_date else ""
+        date_str = f" | Date: {item['publish_date']}" if item["publish_date"] else ""
         
-        # Rule 1: Field standardization format: Title / URL / Snippet / Source Label / Publish Date
         formatted_lines.append(
-            f"{idx+1}. **[{title}]({url})**\n"
+            f"{idx}. **[{title}]({url})**\n"
             f"   - Snippet: {snippet}\n"
             f"   - Source: {sources_str}{date_str}"
         )
